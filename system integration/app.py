@@ -78,48 +78,8 @@ class VoxyApp(tk.Tk):
 
     # -------------------- Main layout --------------------
 
+   
     def _build_shell(self):
-        self.titlebar = tk.Frame(self, bg=BG, height=34)
-        self.titlebar.pack(fill="x", side="top")
-
-        tk.Label(
-            self.titlebar, text="●", fg=ORANGE,
-            bg=BG, font=("Arial", 10)
-        ).pack(side="left", padx=(12, 5))
-
-        tk.Label(
-            self.titlebar, text="Voxy",
-            fg=TEXT, bg=BG, font=FONT_SMALL
-        ).pack(side="left")
-
-        controls = tk.Frame(self.titlebar, bg=BG)
-        controls.pack(side="right", padx=10)
-
-        tk.Button(
-            controls, text="☼", command=self.toggle_theme,
-            bg=PANEL, fg=TEXT, bd=0, width=2
-        ).pack(side="left", padx=2)
-
-        tk.Button(
-            controls, text="☾", command=self.toggle_theme,
-            bg=PANEL, fg=TEXT, bd=0, width=2
-        ).pack(side="left", padx=2)
-
-        tk.Button(
-            controls, text="—", command=self.iconify,
-            bg=BG, fg=TEXT, bd=0, width=2
-        ).pack(side="left")
-
-        tk.Button(
-            controls, text="□", command=self._toggle_maximize,
-            bg=BG, fg=TEXT, bd=0, width=2
-        ).pack(side="left")
-
-        tk.Button(
-            controls, text="×", command=self.destroy,
-            bg=BG, fg=TEXT, bd=0, width=2
-        ).pack(side="left")
-
         self.body = tk.Frame(self, bg=BG)
         self.body.pack(fill="both", expand=True)
 
@@ -172,6 +132,7 @@ class VoxyApp(tk.Tk):
             side="left", fill="both", expand=True,
             padx=18, pady=14
         )
+
 
     def _toggle_maximize(self):
         try:
@@ -238,9 +199,12 @@ class VoxyApp(tk.Tk):
 
         self._logo_mark(center, 94)
 
+      
         tk.Label(
-            center, text="VOXY",
-            bg=BG, fg="white",
+            center,
+            text="VOXY",
+            bg=BG,
+            fg="#000000" if self.light_mode else "#FFFFFF",
             font=("Inria Serif", 20, "bold")
         ).pack(pady=(2, 15))
 
