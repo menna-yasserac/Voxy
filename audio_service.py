@@ -42,7 +42,7 @@ def get_model():
 
     if _model is None:
         _model = WhisperModel(
-            "base",
+            "large-v3-turbo",
             device="cpu",
             compute_type="int8"
         )
@@ -156,12 +156,10 @@ def transcribe_audio(audio_file, status_callback=None):
     transcribe_start = time.perf_counter()
 
     segments, info = model.transcribe(
-        audio_file,
-        language="ar",
-        beam_size=5,
-        initial_prompt="أوامر صوتية باللهجة المصرية لفتح التطبيقات والمواقع: افتح فيسبوك، افتح الفيس، شغل يوتيوب، افتح جوجل، افتح انستجرام، افتح واتساب."
-    )
-
+    audio_file,
+    language=None,
+    beam_size=5
+)
     # Faster-Whisper completes inference as segments are consumed.
     recognized_text = "".join(
         segment.text for segment in segments
