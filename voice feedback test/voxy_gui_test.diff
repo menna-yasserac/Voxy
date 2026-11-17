@@ -1,0 +1,125 @@
+--- backup_original/voxy_gui_test.py	2026-11-17 22:14:28.441548485 +0000
++++ voxy_gui_test.py	2026-11-17 22:15:25.302474104 +0000
+@@ -28,6 +28,11 @@
+ from execution import LinuxExecutor
+ 
+ try:
++    import voice_feedback
++except Exception:  # voice feedback is optional; Voxy works without it
++    voice_feedback = None
++
++try:
+     import sounddevice as sd
+ except Exception:
+     sd = None
+@@ -431,6 +436,11 @@
+         self._audio_busy = False
+         self.continuous_listening = True
+ 
++        # voice feedback bookkeeping (see voice_feedback.py)
++        self._voice_last_command = ""
++        self._voice_last_status = None
++        self._voice_proc_token = None
++
+         api_key = os.environ.get("GROQ_API_KEY")
+ 
+         if not api_key:
+@@ -482,8 +492,50 @@
+     def f(self, size, weight="normal"):
+         return (self.family, size, weight)
+ 
++    # -------------------------------------
++    # voice feedback (optional, see voice_feedback.py)
++    # -------------------------------------
++
++    def _vf(self, name, *args, **kwargs):
++        """Call voice_feedback.<name>; can never raise into the GUI."""
++        if voice_feedback is None:
++            return None
++        try:
++            return getattr(voice_feedback, name)(*args, **kwargs)
++        except Exception as error:
++            print("[Voice] ignored error:", repr(error), flush=True)
++            return None
++
++    def _voice_announce_result(self, success, message):
++        status = self._voice_last_status
++        command = self._voice_last_command
++        self._voice_last_status = None
++
++        if status == "Needs Clarification":
++            self._vf("speak_clarification", message, context=command)
++        elif success:
++            self._vf("speak_success", context=command)
++        else:
++            self._vf("speak_error", context=command)
++
++    def _voice_schedule_processing_hint(self, command):
++        if voice_feedback is None:
++            return
++        token = object()
++        self._voice_proc_token = token
++        self.after(6000, self._voice_processing_hint, token, command)
++
++    def _voice_processing_hint(self, token, command):
++        if (
++            self.ui_state == "processing"
++            and self._voice_proc_token is token
++            and not self._vf("is_speaking")
++        ):
++            self._vf("speak_status", context=command)
++
+     def _on_close(self):
+         self.mic_level.stop()
++        self._vf("shutdown")
+         self.destroy()
+ 
+     def _on_status(self, *args):
+@@ -750,6 +802,8 @@
+         if self._audio_busy:
+             return
+ 
++        self._vf("stop_speaking")
++
+         self._audio_busy = True
+         self.ui_state = "listening"
+         self.notice = None
+@@ -835,6 +889,10 @@
+ 
+     def _resume_listening(self):
+ 
++        if self._vf("is_speaking"):
++            self.after(300, self._resume_listening)
++            return
++
+         if (
+             self.continuous_listening
+             and not self._audio_busy
+@@ -866,6 +924,9 @@
+         self.status_message.set("Processing your command…")
+         self._render_bottom()
+ 
++        self._voice_last_command = command
++        self._voice_schedule_processing_hint(command)
++
+         threading.Thread(
+             target=self._execute_real_pipeline,
+             args=(command,),
+@@ -1082,6 +1143,8 @@
+             flush=True
+         )
+ 
++        self._voice_last_status = status
++
+         self.after(
+             0,
+             self._add_history,
+@@ -1104,6 +1167,8 @@
+ 
+         self.ui_state = "idle"
+ 
++        self._voice_announce_result(success, message)
++
+         self.notice = {
+             "ok": success,
+             "title": "Done!" if success else "Something Went Wrong",
