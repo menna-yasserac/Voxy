@@ -13,6 +13,7 @@ animations. Without it the animation falls back to a smooth simulated level.
 import math
 import os
 import random
+import re
 import threading
 import time
 import traceback
@@ -36,6 +37,37 @@ try:
     import sounddevice as sd
 except Exception:
     sd = None
+
+# Arabic shaping + right-to-left ordering for Tk (pip install arabic-reshaper python-bidi)
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+except Exception:
+    arabic_reshaper = None
+    get_display = None
+
+_AR_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
+
+
+def has_arabic(text):
+    return bool(_AR_RE.search(str(text or "")))
+
+
+def ar(text):
+    """Make Arabic text display correctly in Tk (display only, never for parsing)."""
+    text = "" if text is None else str(text)
+    if arabic_reshaper is None or not has_arabic(text):
+        return text
+    lines = []
+    for line in text.split("\n"):
+        if has_arabic(line):
+            try:
+                line = get_display(arabic_reshaper.reshape(line))
+            except Exception:
+                pass
+        lines.append(line)
+    return "\n".join(lines)
+
 
 # Set to False if reading the mic for the animation ever conflicts with
 # audio_service_AI on your machine (the animation then uses a simulated level).
@@ -296,12 +328,13 @@ class Stage(tk.Canvas):
         if text == self._text:
             return
         self._text = text
-        w = max(300, self.pill_font.measure(text) + 28 * 2 + 24)
+        shown = ar(text)
+        w = max(300, self.pill_font.measure(shown) + 28 * 2 + 24)
         left, cx = self.cx - w / 2, self.cx
         self.coords(self.pill, *rrect_points(left, 184, left + w, 228, 22))
         self.coords(self.dot, left + 25, 201, left + 35, 211)
         self.coords(self.pill_text, left + 49, 206)
-        self.itemconfig(self.pill_text, text=text)
+        self.itemconfig(self.pill_text, text=shown)
 
     def update_anim(self, t, state, level):
         P, cx, my = self.P, self.cx, self.MIC_Y
@@ -413,8 +446,8 @@ class VoxyApp(tk.Tk):
         super().__init__()
 
         self.title("Voxy - Linux AI Assistant")
-        self.geometry("1100x740")
-        self.minsize(880, 660)
+        self.geometry("1100x800")
+        self.minsize(880, 700)
 
         families = set(tkfont.families())
         self.family = next(
@@ -678,7 +711,7 @@ class VoxyApp(tk.Tk):
         else:
             self._input_row(self.bottom)
 
-    def _input_row(self, parent):
+    def _input_row(self, parent, show_chips=True):
         P = self.P
 
         row = tk.Frame(parent, bg=P["bg"])
@@ -702,6 +735,9 @@ class VoxyApp(tk.Tk):
         entry.bind("<FocusOut>", lambda e: box.itemconfig(outline, outline=P["line"]))
 
         self._btn(row, "Run", self.submit_command, 96, 48, P["bg"]).pack(side="left")
+
+        if not show_chips:
+            return
 
         chips = tk.Frame(parent, bg=P["bg"])
         chips.pack(pady=(16, 0))
@@ -740,31 +776,34 @@ class VoxyApp(tk.Tk):
             badge_char = "!"
             title_color = RED
 
-        icon = tk.Canvas(card, width=48, height=48, bg=P["bg"],
-                         highlightthickness=0)
-        icon.pack(pady=(0, 4))
-        icon.create_oval(2, 2, 46, 46, fill=color, outline="")
-        icon.create_text(24, 24, text=badge_char, fill="white",
-                         font=self.f(19, "bold"))
+        if not is_clarification:
+            icon = tk.Canvas(card, width=48, height=48, bg=P["bg"],
+                             highlightthickness=0)
+            icon.pack(pady=(0, 4))
+            icon.create_oval(2, 2, 46, 46, fill=color, outline="")
+            icon.create_text(24, 24, text=badge_char, fill="white",
+                             font=self.f(19, "bold"))
 
-        tk.Label(card, text=n["title"], fg=title_color,
+        tk.Label(card, text=ar(n["title"]), fg=title_color,
                  bg=P["bg"], font=self.f(13, "bold")).pack()
-        tk.Label(card, text=n["message"], fg=P["text"], bg=P["bg"],
-                 font=self.f(11), wraplength=540,
-                 justify="left").pack(pady=(6, 10))
+        tk.Label(card, text=ar(n["message"]), fg=P["text"], bg=P["bg"],
+                 font=self.f(11), wraplength=640,
+                 justify="right" if has_arabic(n["message"]) else "left"
+                 ).pack(pady=(6, 10))
 
         btn_row = tk.Frame(card, bg=P["bg"])
-        btn_row.pack()
 
         if is_clarification:
-            # Show quick input box right below the paths list + Reply/Mic button
-            self._input_row(card)
+            # Input box right below the list, then Cancel (no chips: saves height)
+            self._input_row(card, show_chips=False)
+            btn_row.pack(pady=(10, 0))
             self._btn(
                 btn_row, "Cancel", self._dismiss_notice, 120, 36, P["bg"],
                 fill=P["card"], hover=P["hover"], fg=P["muted"],
                 outline=P["line"], size=10
-            ).pack(pady=(8, 0))
+            ).pack()
         else:
+            btn_row.pack()
             self._btn(
                 btn_row, n["button"], n["command"], 180, 40, P["bg"],
                 fill=P["card"], hover=P["hover"], fg=P["text"],
@@ -1279,7 +1318,7 @@ class VoxyApp(tk.Tk):
 
             tk.Label(
                 row,
-                text="◉  " + item["command"],
+                text="◉  " + ar(item["command"]),
                 bg=P["card"],
                 fg=P["text"],
                 anchor="w",

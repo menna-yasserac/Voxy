@@ -127,6 +127,8 @@ class LinuxExecutor:
         self.last_video_ids = []
         self.last_video_titles = []
         self.last_search_candidates = []
+        self.pending_action = None   # "open" | "delete" | "create"
+        self.pending_create = None   # folder_name / file_name / content waiting for a folder choice
 
         # Adaptive Self-Learning Cache for websites
         self.memory_file = Path.home() / ".local" / "share" / "voxy" / "learned_sites.json"
@@ -643,7 +645,10 @@ class LinuxExecutor:
 
         if has_dependency or len(actions_to_run) == 1:
             for action_data in actions_to_run:
-                results.append(self.execute_one(action_data, confirm_callback))
+                r = self.execute_one(action_data, confirm_callback)
+                results.append(r)
+                if r.get("needs_clarification"):
+                    break   # wait for the user's choice before running the rest
         else:
             with ThreadPoolExecutor(max_workers=min(6, len(actions_to_run))) as pool:
                 futures = [
@@ -713,7 +718,8 @@ class LinuxExecutor:
             "select_search_result":
                 lambda: self.select_search_result(
                     selection=data.get("selection"),
-                    parent_hint=data.get("parent_folder") or target
+                    parent_hint=data.get("parent_folder") or target,
+                    confirm_callback=confirm_callback
                 ),
 
             "list_directory":
@@ -852,11 +858,15 @@ class LinuxExecutor:
                 return False, f"Could not launch {name}: {error}"
 
         # 3. Not found as an installed system app -> check if it's a local folder/file before web search
-        exact, _ = self._fast_search_candidates([name, english_phonetic], max_depth=5)
-        if len(exact) == 1:
-            return self._open_path_with_xdg(exact[0])
-        elif len(exact) > 1:
-            self.last_search_candidates = exact[:10]
+        exact, fuzzy = self._fast_search_candidates([name, english_phonetic], max_depth=5)
+        matches = list(exact)
+        if re.search(r"[\u0600-\u06FF]", str(name)):
+            matches += [f for f in fuzzy if f not in exact]
+        if len(matches) == 1:
+            return self._open_path_with_xdg(matches[0])
+        elif len(matches) > 1:
+            self.last_search_candidates = matches[:10]
+            self.pending_action = "open"
             return self._format_disambiguation_prompt(name, self.last_search_candidates)
 
         # 4. Not on the system at all -> fall back to self-learning website / Firefox search
@@ -1125,6 +1135,47 @@ class LinuxExecutor:
             candidate = home / candidate
         return Path(os.path.normpath(candidate))
 
+    def _skeleton(self, s):
+        """Loose Arabic spelling key: ندى / نادا / محمد / المحمد -> same key."""
+        s = str(s or "").casefold()
+        s = re.sub(r"[\u064B-\u0652\u0640]", "", s)
+        s = re.sub("[أإآٱ]", "ا", s).replace("ى", "ي").replace("ة", "ه")
+        s = re.sub(r"[\W_]+", "", s)
+        if not re.search(r"[\u0600-\u06FF]", s):
+            return s
+        if s.startswith("ال") and len(s) > 3:
+            s = s[2:]
+        sk = re.sub("[اويaeiou]", "", s)
+        return sk or s
+
+    def _xkey(self, s):
+        """Cross-script key: محمد / Mohamed / Muhammad -> 'mhmd' (consonants only)."""
+        s = str(s or "").casefold()
+        s = re.sub(r"[\u064B-\u0652\u0640]", "", s)
+        s = re.sub("[أإآٱ]", "ا", s)
+        if s.startswith("ال") and len(s) > 3:
+            s = s[2:]
+        for a, b in (("sh", "s"), ("kh", "k"), ("th", "t"), ("dh", "z"),
+                     ("gh", "j"), ("ph", "f"), ("ch", "s")):
+            s = s.replace(a, b)
+        table = {
+            "ب": "b", "ت": "t", "ث": "t", "ج": "j", "ح": "h", "خ": "k",
+            "د": "d", "ذ": "z", "ر": "r", "ز": "z", "س": "s", "ش": "s",
+            "ص": "s", "ض": "d", "ط": "t", "ظ": "z", "غ": "j", "ف": "f",
+            "ق": "k", "ك": "k", "ل": "l", "م": "m", "ن": "n", "ه": "h",
+        }
+        out = []
+        for ch in s:
+            if ch in table:
+                out.append(table[ch])
+            elif ch in "gj":
+                out.append("j")
+            elif ch in "kqc":
+                out.append("k")
+            elif ch.isdigit() or ("a" <= ch <= "z" and ch not in "aeiouyw"):
+                out.append(ch)
+        return re.sub(r"(.)\1+", r"\1", "".join(out))
+
     def _fast_search_candidates(self, query_names, search_root=None, max_depth=5):
         root = search_root or Path.home().resolve()
         clean_queries = [
@@ -1171,12 +1222,21 @@ class LinuxExecutor:
                     continue
 
                 is_similar = False
+                item_sk = self._skeleton(stem_lower)
+                item_xk = self._xkey(stem_lower)
                 for nt in norm_targets:
+                    nt_xk = self._xkey(nt)
+                    if len(nt_xk) >= 2 and nt_xk == item_xk:
+                        is_similar = True
+                        break
+                    nt_sk = self._skeleton(nt)
+                    if len(nt_sk) >= 2 and nt_sk == item_sk:
+                        is_similar = True
+                        break
                     if len(nt) >= 2 and (nt in item_lower or item_lower in nt):
                         is_similar = True
                         break
-                    ratio = difflib.SequenceMatcher(None, nt, item_lower).ratio()
-                    if ratio >= 0.68:
+                    if difflib.SequenceMatcher(None, nt, item_lower).ratio() >= 0.68:
                         is_similar = True
                         break
 
@@ -1203,21 +1263,23 @@ class LinuxExecutor:
         except OSError as error:
             return False, str(error)
 
-    def _format_disambiguation_prompt(self, target, candidates):
+    def _format_disambiguation_prompt(self, target, candidates, verb="أفتح"):
         """Formats a clear list showing both numbers and parent folder locations."""
         home_path = Path.home().resolve()
-        home_str = str(home_path)
         lines = []
         for i, p in enumerate(candidates, 1):
-            pretty_path = str(p).replace(home_str, "~")
-            parent_name = p.parent.name if p.parent != home_path else "Home"
+            pretty = str(p).replace(str(home_path), "~")
+            parent = p.parent.name if p.parent != home_path else "Home"
             kind = "Folder" if p.is_dir() else "File"
-            lines.append(f"{i}. {pretty_path}  ({kind} inside {parent_name})")
-
+            lines.append(f"{i}. {p.name}  —  {pretty}  ({kind} inside {parent})")
+        if self.pending_action == "create":
+            header = f"لقيت أكتر من فولدر قريب لـ '{target}'، تحب أنشئ فيه أنهي واحد؟"
+        else:
+            header = f"لقيت أكتر من اسم قريب لـ '{target}'، تحب {verb} أنهي واحد؟"
         msg = (
-            f"لقيت أكتر من مسار لـ '{target}'، تحب أفتح أنهي واحد؟\n"
+            header + "\n"
             + "\n".join(lines)
-            + "\n(تقدر تقول: 'رقم 1' أو 'اللي في Desktop')"
+            + "\n(قول: 'رقم 1' أو 'اللي في Desktop')"
         )
         return "clarification", msg
 
@@ -1226,6 +1288,7 @@ class LinuxExecutor:
             return False, "File or folder name is missing."
 
         self.last_search_candidates = []
+        self.pending_action = None
 
         # Case A: User specified a parent folder (e.g., "open OS inside Home")
         if parent_folder:
@@ -1239,11 +1302,12 @@ class LinuxExecutor:
                 exact, fuzzy = self._fast_search_candidates(
                     [target, english_phonetic], search_root=parent_path, max_depth=2
                 )
-                matches = exact or fuzzy
+                matches = exact + [f for f in fuzzy if f not in exact]
                 if len(matches) == 1:
                     return self._open_path_with_xdg(matches[0])
                 elif len(matches) > 1:
                     self.last_search_candidates = matches[:10]
+                    self.pending_action = "open"
                     return self._format_disambiguation_prompt(target, self.last_search_candidates)
                 else:
                     self._open_path_with_xdg(parent_path)
@@ -1259,51 +1323,66 @@ class LinuxExecutor:
 
         # Case B: Global fast search across Home FIRST so multiple case variants (OS, os, Os, oS) are ALL caught!
         exact, fuzzy = self._fast_search_candidates([target, english_phonetic], max_depth=5)
+        matches = exact + [f for f in fuzzy if f not in exact]
 
-        if len(exact) == 1:
-            return self._open_path_with_xdg(exact[0])
-
-        candidates_to_show = exact if len(exact) > 1 else fuzzy
-        if len(candidates_to_show) == 1:
-            return self._open_path_with_xdg(candidates_to_show[0])
-
-        if len(candidates_to_show) > 1:
-            self.last_search_candidates = candidates_to_show[:10]
+        if len(matches) == 1:
+            return self._open_path_with_xdg(matches[0])
+        if len(matches) > 1:
+            self.last_search_candidates = matches[:10]
+            self.pending_action = "open"
             return self._format_disambiguation_prompt(target, self.last_search_candidates)
 
         return False, f"Could not find any file or folder matching '{target}'."
 
-    def select_search_result(self, selection=None, parent_hint=None):
+    def _act_on_choice(self, path, confirm_callback=None):
+        mode = self.pending_action
+        pending_create = self.pending_create
+        self.last_search_candidates = []
+        self.pending_action = None
+        self.pending_create = None
+        if mode == "create" and pending_create:
+            return self.create_structure(
+                pending_create.get("folder_name"),
+                pending_create.get("file_name"),
+                pending_create.get("content", ""),
+                target=str(path),
+                resolved_base=path
+            )
+        if mode == "delete":
+            return self._delete_path(path, confirm_callback)
+        return self._open_path_with_xdg(path)
+
+    def select_search_result(self, selection=None, parent_hint=None, confirm_callback=None):
         if not self.last_search_candidates:
             return False, "There is no active file search list to choose from."
+        verb = "أمسح" if self.pending_action == "delete" else "أفتح"
 
-        # 1. Selection by parent folder location (e.g., "اللي في Desktop" or "the one in Documents")
+        # 1. Selection by parent folder (e.g., "اللي في Desktop")
         if parent_hint:
             hint_resolved = self._resolve_folder_path(parent_hint)
             hint_cf = str(parent_hint).strip().casefold()
-            parent_matches = [
-                cand for cand in self.last_search_candidates
+            pm = [
+                c for c in self.last_search_candidates
                 if (
-                    cand.parent == hint_resolved
-                    or hint_cf in cand.parent.name.casefold()
-                    or hint_cf in str(cand.parent).casefold()
+                    c.parent == hint_resolved
+                    or hint_cf in c.parent.name.casefold()
+                    or hint_cf in str(c.parent).casefold()
                 )
             ]
-            if len(parent_matches) == 1:
-                self.last_search_candidates = []
-                return self._open_path_with_xdg(parent_matches[0])
-            elif len(parent_matches) > 1:
-                self.last_search_candidates = parent_matches
-                return self._format_disambiguation_prompt(parent_matches[0].name, parent_matches)
+            if len(pm) == 1:
+                return self._act_on_choice(pm[0], confirm_callback)
+            elif len(pm) > 1:
+                self.last_search_candidates = pm
+                return self._format_disambiguation_prompt(pm[0].name, pm, verb)
 
-        # 2. Selection by number (e.g., "رقم 2" or "التاني")
+        # 2. Selection by number (e.g., "رقم 2")
         if selection is not None:
             try:
                 idx = int(selection) - 1
                 if 0 <= idx < len(self.last_search_candidates):
-                    chosen = self.last_search_candidates[idx]
-                    self.last_search_candidates = []
-                    return self._open_path_with_xdg(chosen)
+                    return self._act_on_choice(
+                        self.last_search_candidates[idx], confirm_callback
+                    )
             except (TypeError, ValueError):
                 pass
 
@@ -1353,24 +1432,89 @@ class LinuxExecutor:
         folder_name=None,
         file_name=None,
         content="",
-        target=None
+        target=None,
+        resolved_base=None
     ):
+        """
+        Rules:
+        - "create folder/file X" with NO destination  -> created directly in
+          Home, no question asked, and files are created EMPTY.
+        - "create folder/file X inside Y"             -> look for folders
+          similar to Y; ask only if there is more than one; use it if there
+          is exactly one; create Y inside Home if none exists.
+        """
         home = Path.home().resolve()
 
         try:
             raw_target = str(target or "").strip()
-            base_name = self.FOLDER_ALIASES.get(raw_target.casefold(), raw_target)
+            folder_name = str(folder_name).strip() if folder_name else None
+            file_name = str(file_name).strip() if file_name else None
 
-            base_folder = Path(base_name).expanduser() if base_name else home
-            if not base_folder.is_absolute():
-                base_folder = home / base_folder
+            def _same(a, b):
+                return bool(a and b) and a.casefold() in (
+                    b.casefold(), Path(b).stem.casefold()
+                )
+
+            # The model sometimes repeats the NEW item's own name as "target".
+            # That is not a destination -> ignore it.
+            if raw_target and (_same(raw_target, file_name) or _same(raw_target, folder_name)):
+                raw_target = ""
+
+            # A file + a folder name but no explicit destination:
+            # the folder is where the file should go ("create a.txt in docs").
+            destination = raw_target
+            new_folder = folder_name
+            if file_name and folder_name and not raw_target:
+                destination = folder_name
+                new_folder = None
+
+            # Home / Desktop / Downloads ... are fixed aliases: no question.
+            dest_key = destination.casefold()
+            is_alias = dest_key in self.FOLDER_ALIASES
+            is_path = "/" in destination or destination.startswith("~")
+
+            # ---- No destination at all: straight into Home, EMPTY file ----
+            if not destination and resolved_base is None:
+                resolved_base = home
+                content = ""
+
+            # ---- Destination given: search similar folders, ask if many ----
+            if destination and resolved_base is None and not is_alias and not is_path:
+                exact, fuzzy = self._fast_search_candidates([destination], max_depth=4)
+                seen, unique = set(), []
+                for d in [p for p in exact + fuzzy if p.is_dir()]:
+                    if d not in seen:
+                        seen.add(d)
+                        unique.append(d)
+
+                if len(unique) > 1:
+                    self.last_search_candidates = unique[:10]
+                    self.pending_action = "create"
+                    self.pending_create = {
+                        "folder_name": new_folder,
+                        "file_name": file_name,
+                        "content": content,
+                    }
+                    return self._format_disambiguation_prompt(
+                        destination, self.last_search_candidates
+                    )
+                if len(unique) == 1:
+                    resolved_base = unique[0]
+
+            if resolved_base is not None:
+                base_folder = Path(resolved_base)
+            else:
+                base_name = self.FOLDER_ALIASES.get(dest_key, destination)
+                base_folder = Path(base_name).expanduser() if base_name else home
+                if not base_folder.is_absolute():
+                    base_folder = home / base_folder
 
             base_folder = base_folder.resolve()
 
             if home not in (base_folder, *base_folder.parents):
                 return False, "Target folder must be inside home directory."
 
-            folder = (base_folder / folder_name if folder_name else base_folder).resolve()
+            folder = (base_folder / new_folder if new_folder else base_folder).resolve()
 
             if base_folder not in (folder, *folder.parents):
                 return False, "Invalid folder path."
@@ -1423,33 +1567,51 @@ class LinuxExecutor:
 
         return matches
 
-    def delete_item(self, target, confirm_callback=None):
-        if not target:
-            return False, "Target is missing."
-
+    def _is_protected(self, path):
         home = Path.home().resolve()
-        matches = self._find_items_in_home(target)
-
-        if not matches:
-            return False, f"Could not find {target} in your home folder."
-
-        if len(matches) > 1:
-            shown = ", ".join(str(match) for match in matches[:5])
-            return False, (
-                f"Found {len(matches)} items named {target}: {shown}. Please say which one."
-            )
-
-        path = matches[0]
-        parent = path.parent.resolve()
-
         protected = {home} | {
-            home / name for name in (
+            home / n for n in (
                 "Desktop", "Documents", "Downloads",
                 "Pictures", "Music", "Videos"
             )
         }
+        parent = path.parent.resolve()
+        return (parent != home and home not in parent.parents) or path in protected
 
-        if (parent != home and home not in parent.parents) or path in protected:
+    def delete_item(self, target, confirm_callback=None):
+        if not target:
+            return False, "Target is missing."
+
+        self.last_search_candidates = []
+        self.pending_action = None
+        home = Path.home().resolve()
+
+        cands = []
+        explicit = Path(str(target)).expanduser()
+        if not explicit.is_absolute():
+            explicit = home / explicit
+        if "/" in str(target) and explicit.exists():
+            cands.append(Path(os.path.normpath(explicit)))
+
+        exact, fuzzy = self._fast_search_candidates([target], max_depth=4)
+        for p in exact + fuzzy:
+            if p not in cands:
+                cands.append(p)
+        cands = [p for p in cands if not self._is_protected(p)]
+
+        if not cands:
+            return False, f"Could not find {target} in your home folder."
+        if len(cands) == 1:
+            return self._delete_path(cands[0], confirm_callback)
+
+        self.last_search_candidates = cands[:10]
+        self.pending_action = "delete"
+        return self._format_disambiguation_prompt(
+            target, self.last_search_candidates, verb="أمسح"
+        )
+
+    def _delete_path(self, path, confirm_callback=None):
+        if self._is_protected(path):
             return False, "This item cannot be deleted."
 
         if confirm_callback is None:
