@@ -3,14 +3,12 @@ import re
 import json
 import time
 import shutil
-import difflib
 import subprocess
 import urllib.request
 import urllib.error
-from concurrent.futures import ThreadPoolExecutor
 
 from pathlib import Path
-from urllib.parse import quote_plus, unquote
+from urllib.parse import quote_plus
 
 try:
     from atspi_controller import ATSPIController
@@ -19,6 +17,15 @@ except (ImportError, OSError):
     ATSPIController = None
     ATSPI_AVAILABLE = False
 
+try:
+    from screen_control import (
+        ScreenController, is_dangerous, is_here, strip_ui_words
+    )
+    SCREEN_CONTROL_AVAILABLE = True
+except ImportError:
+    ScreenController = None
+    SCREEN_CONTROL_AVAILABLE = False
+
 
 def which(name):
     return shutil.which(name)
@@ -26,11 +33,9 @@ def which(name):
 
 class LinuxExecutor:
 
-    # Launch binary candidates (includes common Arabic transliterations)
     APP_ALIASES = {
         "firefox": ["firefox", "firefox-esr"],
         "فايرفوكس": ["firefox", "firefox-esr"],
-        "الفايرفوكس": ["firefox", "firefox-esr"],
         "chrome": [
             "google-chrome", "google-chrome-stable",
             "chromium", "chromium-browser"
@@ -39,100 +44,77 @@ class LinuxExecutor:
             "google-chrome", "google-chrome-stable",
             "chromium", "chromium-browser"
         ],
-        "جوجل كروم": [
-            "google-chrome", "google-chrome-stable",
-            "chromium", "chromium-browser"
-        ],
         "terminal": [
-            "gnome-terminal", "ptyxis", "x-terminal-emulator", "xfce4-terminal"
+            "ptyxis", "x-terminal-emulator",
+            "gnome-terminal", "xfce4-terminal"
         ],
-        "ترمينال": ["gnome-terminal", "ptyxis", "x-terminal-emulator", "xfce4-terminal"],
-        "تيرمينال": ["gnome-terminal", "ptyxis", "x-terminal-emulator", "xfce4-terminal"],
-        "التيرمينال": ["gnome-terminal", "ptyxis", "x-terminal-emulator", "xfce4-terminal"],
-        "الترمينال": ["gnome-terminal", "ptyxis", "x-terminal-emulator", "xfce4-terminal"],
+        "ترمينال": ["gnome-terminal", "xfce4-terminal"],
         "files": ["nautilus", "thunar", "dolphin"],
         "file manager": ["nautilus", "thunar", "dolphin"],
         "الملفات": ["nautilus", "thunar", "dolphin"],
-        "فايلز": ["nautilus", "thunar", "dolphin"],
         "calculator": ["gnome-calculator", "kcalc"],
         "الحاسبة": ["gnome-calculator", "kcalc"],
-        "كالكوليتور": ["gnome-calculator", "kcalc"],
-        "الكالكوليتور": ["gnome-calculator", "kcalc"],
-        "كلكوليتور": ["gnome-calculator", "kcalc"],
         "settings": ["gnome-control-center"],
         "الإعدادات": ["gnome-control-center"],
-        "سيتينجز": ["gnome-control-center"],
-        "text editor": ["gnome-text-editor", "gedit", "mousepad"],
-        "المفكرة": ["gnome-text-editor", "gedit", "mousepad"],
-        "vs code": ["code"],
-        "vscode": ["code"],
-        "كود": ["code"],
+        "text editor": ["gedit", "gnome-text-editor", "mousepad"],
+        "المفكرة": ["gedit", "gnome-text-editor", "mousepad"],
     }
 
-    # Actual Linux process patterns (handles Snap, Flatpak, -bin, server daemons)
-    PROCESS_PATTERNS = {
-        "firefox": ["firefox", "firefox-bin", "firefox-esr"],
-        "فايرفوكس": ["firefox", "firefox-bin", "firefox-esr"],
-        "الفايرفوكس": ["firefox", "firefox-bin", "firefox-esr"],
-        "chrome": ["chrome", "google-chrome", "chromium"],
-        "كروم": ["chrome", "google-chrome", "chromium"],
-        "جوجل كروم": ["chrome", "google-chrome", "chromium"],
-        "files": ["nautilus", "thunar", "dolphin"],
-        "file manager": ["nautilus", "thunar", "dolphin"],
-        "الملفات": ["nautilus", "thunar", "dolphin"],
-        "فايلز": ["nautilus", "thunar", "dolphin"],
-        "calculator": ["gnome-calculator", "kcalc"],
-        "الحاسبة": ["gnome-calculator", "kcalc"],
-        "كالكوليتور": ["gnome-calculator", "kcalc"],
-        "الكالكوليتور": ["gnome-calculator", "kcalc"],
-        "settings": ["gnome-control-center"],
-        "الإعدادات": ["gnome-control-center"],
-        "text editor": ["gnome-text-editor", "gedit", "mousepad"],
-        "المفكرة": ["gnome-text-editor", "gedit", "mousepad"],
-        "terminal": ["gnome-terminal-server", "gnome-terminal", "ptyxis", "xfce4-terminal"],
-        "ترمينال": ["gnome-terminal-server", "gnome-terminal", "ptyxis", "xfce4-terminal"],
-        "تيرمينال": ["gnome-terminal-server", "gnome-terminal", "ptyxis", "xfce4-terminal"],
-        "التيرمينال": ["gnome-terminal-server", "gnome-terminal", "ptyxis", "xfce4-terminal"],
-        "vs code": ["code"],
-        "vscode": ["code"],
-        "كود": ["code"],
-    }
-
-    FOLDER_ALIASES = {
-        "داول لوت": "Downloads",
-        "داونلودز": "Downloads",
-        "داون لود": "Downloads",
-        "downloads": "Downloads",
-        "ديسكتوب": "Desktop",
-        "desktop": "Desktop",
-        "دوكيومنتس": "Documents",
-        "documents": "Documents",
-        "هوم": "",
-        "الهوم": "",
-        "home": "",
-        "صور": "Pictures",
-        "pictures": "Pictures",
-        "فيديوهات": "Videos",
-        "videos": "Videos",
+    WEBSITE_ALIASES = {
+        "google": "https://www.google.com",
+        "جوجل": "https://www.google.com",
+        "youtube": "https://www.youtube.com",
+        "يوتيوب": "https://www.youtube.com",
+        "facebook": "https://www.facebook.com",
+        "فيسبوك": "https://www.facebook.com",
+        "فيس بوك": "https://www.facebook.com",
+        "instagram": "https://www.instagram.com",
+        "انستغرام": "https://www.instagram.com",
+        "إنستغرام": "https://www.instagram.com",
+        "انستجرام": "https://www.instagram.com",
+        "إنستجرام": "https://www.instagram.com",
+        "twitter": "https://www.x.com",
+        "تويتر": "https://www.x.com",
+        "x": "https://www.x.com",
+        "gemini": "https://gemini.google.com",
+        "جيميناي": "https://gemini.google.com",
+        "جيميني": "https://gemini.google.com",
+        "chatgpt": "https://chatgpt.com",
+        "chat gpt": "https://chatgpt.com",
+        "تشات جي بي تي": "https://chatgpt.com",
+        "شات جي بي تي": "https://chatgpt.com",
+        "whatsapp": "https://web.whatsapp.com",
+        "واتساب": "https://web.whatsapp.com",
+        "واتس اب": "https://web.whatsapp.com",
+        "linkedin": "https://www.linkedin.com",
+        "لينكدان": "https://www.linkedin.com",
+        "pinterest": "https://www.pinterest.com",
+        "بينترست": "https://www.pinterest.com",
+        "telegram": "https://web.telegram.org",
+        "تليجرام": "https://web.telegram.org",
+        "gmail": "https://mail.google.com",
+        "جيميل": "https://mail.google.com",
+        "drive": "https://drive.google.com",
+        "google drive": "https://drive.google.com",
+        "جوجل درايف": "https://drive.google.com",
+        "github": "https://github.com",
+        "جيت هاب": "https://github.com",
+        "netflix": "https://www.netflix.com",
+        "نتفلكس": "https://www.netflix.com",
+        "spotify": "https://open.spotify.com",
+        "سبوتيفاي": "https://open.spotify.com",
     }
 
     SKIP_DIRS = {
         "proc", "sys", "dev", "run", "snap",
         "node_modules", "__pycache__", ".cache",
-        "Trash", ".Trash-1000", ".git", ".venv", "venv"
+        "Trash", ".Trash-1000",
     }
 
     def __init__(self):
         self.last_video_query = None
         self.last_video_ids = []
         self.last_video_titles = []
-        self.last_search_candidates = []
-        self.pending_action = None   # "open" | "delete" | "create"
-        self.pending_create = None   # folder_name / file_name / content waiting for a folder choice
-
-        # Adaptive Self-Learning Cache for websites
-        self.memory_file = Path.home() / ".local" / "share" / "voxy" / "learned_sites.json"
-        self.learned_sites = self._load_learned_sites()
 
         self.atspi = None
 
@@ -142,6 +124,15 @@ class LinuxExecutor:
                 print("[AT-SPI] Controller initialized.")
             except Exception as error:
                 print(f"[AT-SPI] Initialization failed: {error}")
+
+        self.screen = None
+
+        if SCREEN_CONTROL_AVAILABLE:
+            try:
+                self.screen = ScreenController()
+                print("[Screen] Screen controller initialized.")
+            except Exception as error:
+                print(f"[Screen] Initialization failed: {error}")
 
     # =========================================
     # GENERAL HELPERS
@@ -164,81 +155,22 @@ class LinuxExecutor:
 
     def get_app_candidates(self, name):
         name = self.normalize_name(name)
+
         if name in self.APP_ALIASES:
             return self.APP_ALIASES[name]
+
         return [name.replace(" ", "-")] if name else []
-
-    def get_process_patterns(self, name):
-        norm = self.normalize_name(name)
-        if norm in self.PROCESS_PATTERNS:
-            return self.PROCESS_PATTERNS[norm]
-        return list(set(self.get_app_candidates(norm) + [norm]))
-
-    def _find_installed_desktop_app(self, query_names):
-        """
-        Searches Ubuntu's installed applications (.desktop entries & PATH)
-        before falling back to web search.
-        Returns executable command list or None.
-        """
-        clean_queries = [
-            self.normalize_name(q) for q in query_names
-            if q and str(q).strip()
-        ]
-        if not clean_queries:
-            return None
-
-        # 1. Check aliases & direct PATH binaries first
-        for q in clean_queries:
-            for candidate in self.get_app_candidates(q):
-                exe = which(candidate)
-                if exe:
-                    return [exe]
-
-        # 2. Scan Ubuntu .desktop application directories
-        desktop_dirs = [
-            Path("/usr/share/applications"),
-            Path("/usr/local/share/applications"),
-            Path("/var/lib/snapd/desktop/applications"),
-            Path.home() / ".local/share/applications",
-        ]
-
-        for d in desktop_dirs:
-            if not d.exists():
-                continue
-            for desktop_file in d.glob("*.desktop"):
-                stem = desktop_file.stem.lower()
-                app_name = ""
-                exec_cmd = ""
-                try:
-                    for line in desktop_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                        if line.startswith("Name=") and not app_name:
-                            app_name = line.split("=", 1)[1].strip().lower()
-                        elif line.startswith("Exec=") and not exec_cmd:
-                            raw_exec = line.split("=", 1)[1].strip()
-                            exec_cmd = re.sub(r"\s+%[a-zA-Z]", "", raw_exec).strip()
-                except OSError:
-                    continue
-
-                if not exec_cmd:
-                    continue
-
-                for q in clean_queries:
-                    if (
-                        q == app_name
-                        or q == stem
-                        or (len(q) >= 3 and (q in app_name or q in stem))
-                    ):
-                        parts = exec_cmd.split()
-                        if parts and which(parts[0]):
-                            return parts
-
-        return None
 
     # =========================================
     # AT-SPI HELPERS
     # =========================================
 
     def _normalize_atspi_result(self, result, operation):
+        """
+        Converts the AT-SPI controller result into
+        the (success, message) format used by LinuxExecutor.
+        """
+
         if isinstance(result, dict):
             success = bool(result.get("success", False))
             message = (
@@ -265,18 +197,34 @@ class LinuxExecutor:
 
         try:
             result = self.atspi.list_elements()
+
             if isinstance(result, dict):
                 success = bool(result.get("success", False))
                 message = result.get("message", "")
                 elements = result.get("elements", [])
+
                 if not success:
                     return False, message or "Could not read UI elements.", []
+
                 return True, "UI elements retrieved.", elements
+
             return False, "Unexpected AT-SPI response.", []
+
         except Exception as error:
             return False, str(error), []
 
-    def click_element(self, data):
+    def click_element(self, data, confirm_callback=None):
+        """
+        Click something on the screen. Order of attempts:
+
+        1. "here"            -> click where the mouse pointer is.
+        2. explicit x and y  -> click those coordinates.
+        3. AT-SPI by name    -> the accessibility tree (most accurate).
+        4. OCR by name       -> read the screen and click the words.
+
+        data["action"] may be "right_click" or "double_click".
+        """
+
         if not isinstance(data, dict):
             return False, "Invalid click data."
 
@@ -287,32 +235,103 @@ class LinuxExecutor:
             or data.get("selection")
         )
 
-        if element_name and self.atspi:
-            try:
-                result = self.atspi.click(str(element_name))
-                success, message = self._normalize_atspi_result(result, "click")
-                if success:
-                    return True, message
-                print(f"[AT-SPI] Click failed: {message}")
-            except Exception as error:
-                print(f"[AT-SPI] Click error: {error}")
+        click_kind = str(data.get("action") or "").lower()
+        button = "right" if "right" in click_kind else "left"
+        double = "double" in click_kind
 
+        # ---- 1) "click here": the mouse pointer position
+        if not element_name or (
+            SCREEN_CONTROL_AVAILABLE and is_here(element_name)
+        ):
+            x = data.get("x")
+            y = data.get("y")
+
+            if x is None or y is None:
+                if not self.screen:
+                    return False, "Screen control is not available."
+
+                return self.screen.click_here(button, double)
+
+        # ---- dangerous labels need confirmation (Delete, Send, Pay...)
+        if (
+            element_name
+            and SCREEN_CONTROL_AVAILABLE
+            and is_dangerous(element_name)
+        ):
+            if confirm_callback is None:
+                return False, (
+                    f"Clicking '{element_name}' requires confirmation."
+                )
+
+            try:
+                approved = confirm_callback(f"Click '{element_name}'?")
+            except Exception:
+                approved = False
+
+            if not approved:
+                return False, "Click cancelled."
+
+        # ---- 2) explicit coordinates
         x = data.get("x")
         y = data.get("y")
 
         if x is not None and y is not None:
+            try:
+                px, py = int(x), int(y)
+            except (TypeError, ValueError):
+                return False, "Invalid coordinates."
+
+            if self.screen:
+                from screen_control import click_xy
+                return click_xy(px, py, button=button, double=double)
+
             if not which("xdotool"):
                 return False, "xdotool is not installed."
 
             result = self.run_command([
-                "xdotool", "mousemove", str(int(x)), str(int(y)), "click", "1"
+                "xdotool", "mousemove", str(px), str(py), "click", "1"
             ])
+
             if result and result.returncode == 0:
                 return True, "Clicked coordinates."
+
             return False, "Coordinate click failed."
 
+        # ---- 3) AT-SPI (plain left click only)
+        if (
+            element_name
+            and self.atspi
+            and button == "left"
+            and not double
+        ):
+            try:
+                result = self.atspi.click(str(element_name))
+                success, message = self._normalize_atspi_result(
+                    result, "click"
+                )
+
+                if success:
+                    return True, message
+
+                print(f"[AT-SPI] Click failed: {message}")
+
+            except Exception as error:
+                print(f"[AT-SPI] Click error: {error}")
+
+        # ---- 4) OCR: read the screen and click the words
+        if element_name and self.screen:
+            return self.screen.click_text(
+                strip_ui_words(element_name),
+                button=button,
+                double=double,
+                confirm_callback=confirm_callback
+            )
+
         if not self.atspi:
-            return False, "AT-SPI is unavailable and no coordinates were provided."
+            return False, (
+                "AT-SPI and screen reading are not available, "
+                "so I cannot find that element."
+            )
 
         return False, (
             f"Could not click '{element_name}'. "
@@ -320,15 +339,33 @@ class LinuxExecutor:
         )
 
     def type_text(self, text, element_name=None):
+        """
+        If an element name is provided, use AT-SPI.
+        Otherwise type into the currently focused element using xdotool.
+        """
+
         if text is None:
             return False, "No text provided."
 
         if element_name:
             if not self.atspi:
                 return False, "AT-SPI is not available."
+
             try:
-                result = self.atspi.type_text(str(element_name), str(text))
-                return self._normalize_atspi_result(result, "typing")
+                result = self.atspi.type_text(
+                    str(element_name),
+                    str(text)
+                )
+
+                success, message = self._normalize_atspi_result(
+                    result, "typing"
+                )
+
+                if success:
+                    return True, message
+
+                return False, message
+
             except Exception as error:
                 return False, f"AT-SPI typing failed: {error}"
 
@@ -336,38 +373,38 @@ class LinuxExecutor:
             return False, "xdotool is not installed."
 
         result = self.run_command([
-            "xdotool", "type", "--clearmodifiers", "--delay", "2", str(text)
+            "xdotool",
+            "type",
+            "--clearmodifiers",
+            "--delay",
+            "2",
+            str(text)
         ], timeout=20)
 
         if result and result.returncode == 0:
             return True, "Text typed into the focused element."
+
         return False, "Typing failed."
 
     # =========================================
-    # PROCESS AND WINDOW DISCOVERY & WAIT
+    # PROCESS AND WINDOW DISCOVERY
     # =========================================
 
     def _get_process_pids(self, process_name):
-        process_name = os.path.basename(str(process_name)).strip()
-        if not process_name:
+        process_name = os.path.basename(process_name)
+
+        result = self.run_command([
+            "pgrep", "-f", f"^/usr/bin/{process_name}$"
+        ])
+
+        if not result or result.returncode != 0:
             return []
 
-        pids = set()
-        res_exact = self.run_command(["pgrep", "-ix", process_name])
-        if res_exact and res_exact.returncode == 0:
-            for line in res_exact.stdout.splitlines():
-                if line.strip().isdigit():
-                    pids.add(line.strip())
-
-        my_pid = str(os.getpid())
-        res_full = self.run_command(["pgrep", "-if", process_name])
-        if res_full and res_full.returncode == 0:
-            for line in res_full.stdout.splitlines():
-                pid = line.strip()
-                if pid.isdigit() and pid != my_pid:
-                    pids.add(pid)
-
-        return list(pids)
+        return [
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip().isdigit()
+        ]
 
     def _get_process_windows(self, pids):
         if not pids:
@@ -377,107 +414,71 @@ class LinuxExecutor:
 
         if which("wmctrl"):
             result = self.run_command(["wmctrl", "-lp"])
+
             if result and result.returncode == 0:
                 for line in result.stdout.splitlines():
                     parts = line.split(None, 4)
+
                     if len(parts) < 4:
                         continue
-                    window_id, pid = parts[0], parts[2]
+
+                    window_id = parts[0]
+                    pid = parts[2]
                     title = parts[4] if len(parts) > 4 else ""
+
                     if pid in pids:
-                        windows.append({"id": window_id, "pid": pid, "title": title})
+                        windows.append({
+                            "id": window_id,
+                            "pid": pid,
+                            "title": title
+                        })
 
         if which("xdotool"):
             for pid in pids:
                 result = self.run_command([
-                    "xdotool", "search", "--onlyvisible", "--pid", pid
+                    "xdotool",
+                    "search",
+                    "--onlyvisible",
+                    "--pid",
+                    pid
                 ])
+
                 if result and result.returncode == 0:
                     for window_id in result.stdout.splitlines():
                         window_id = window_id.strip()
-                        if window_id and not any(w["id"] == window_id for w in windows):
-                            windows.append({"id": window_id, "pid": pid, "title": ""})
+
+                        if not window_id:
+                            continue
+
+                        if not any(w["id"] == window_id for w in windows):
+                            windows.append({
+                                "id": window_id,
+                                "pid": pid,
+                                "title": ""
+                            })
 
         return windows
 
-    def _find_windows_by_title(self, query_names):
-        """Finds open window IDs whose title matches any candidate name (case-insensitive)."""
-        clean_queries = [
-            str(q).strip().casefold() for q in query_names
-            if q and str(q).strip()
-        ]
-        if not clean_queries:
-            return []
-
-        matched_ids = []
-        if which("wmctrl"):
-            res = self.run_command(["wmctrl", "-l"])
-            if res and res.returncode == 0:
-                for line in res.stdout.splitlines():
-                    parts = line.split(None, 3)
-                    if len(parts) < 4:
-                        continue
-                    win_id, title = parts[0], parts[3].strip()
-                    title_cf = title.casefold()
-                    for q in clean_queries:
-                        if (
-                            title_cf == q
-                            or title_cf.startswith(q + " ")
-                            or title_cf.endswith(" " + q)
-                            or f"/{q}" in title_cf
-                        ):
-                            if win_id not in matched_ids:
-                                matched_ids.append(win_id)
-        return matched_ids
-
-    def _wait_until_actually_open(self, process_patterns, timeout=8.0):
-        """
-        Waits until the application process AND its visible window actually appear
-        on screen before returning the success message.
-        """
+    def _wait_for_app_window(self, process_names, timeout=12):
         start = time.time()
-        process_seen = False
 
         while time.time() - start < timeout:
-            all_pids = []
-            for pat in process_patterns:
-                all_pids.extend(self._get_process_pids(pat))
+            for process_name in process_names:
+                pids = self._get_process_pids(process_name)
+                windows = self._get_process_windows(pids)
 
-            if all_pids:
-                process_seen = True
-                windows = self._get_process_windows(all_pids)
                 if windows:
-                    return True
-                if os.environ.get("XDG_SESSION_TYPE") == "wayland" and (time.time() - start) >= 0.7:
-                    return True
+                    return windows[0]
 
-            time.sleep(0.25)
+            time.sleep(0.4)
 
-        return process_seen
+        return None
 
     # =========================================
-    # ADAPTIVE SELF-LEARNING WEBSITE RESOLUTION
+    # WEBSITE RESOLUTION
     # =========================================
 
-    def _load_learned_sites(self):
-        try:
-            if self.memory_file.exists():
-                return json.loads(self.memory_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-        return {}
-
-    def _save_learned_sites(self):
-        try:
-            self.memory_file.parent.mkdir(parents=True, exist_ok=True)
-            self.memory_file.write_text(
-                json.dumps(self.learned_sites, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-        except Exception:
-            pass
-
-    def _verify_website(self, url, timeout=4):
+    def _verify_website(self, url, timeout=5):
         try:
             request = urllib.request.Request(
                 url,
@@ -489,214 +490,142 @@ class LinuxExecutor:
                 },
                 method="GET"
             )
+
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return response.geturl()
+
         except urllib.error.HTTPError as error:
             if error.code in (403, 405, 429):
                 return url
             return None
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            ValueError
+        ):
             return None
 
-    def _fetch_top_search_url(self, query):
-        """Fetches the first real website URL for a query so Voxy can learn it for next time."""
-        try:
-            ddg_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(query)
-            req = urllib.request.Request(
-                ddg_url,
-                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
-            )
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                html = resp.read().decode("utf-8", errors="ignore")
-                match = re.search(r'uddg=(https?%3A%2F%2F[^&"]+)', html)
-                if match:
-                    url = unquote(match.group(1))
-                    if "duckduckgo.com" not in url:
-                        return url
-        except Exception:
-            pass
-        return None
+    def _resolve_website(self, website):
+        website = self.normalize_name(website)
 
-    def _resolve_website(self, website, english_phonetic=None):
-        key = self.normalize_name(website)
-        if not key:
+        if not website:
             return None, "Website name is missing."
 
-        # 1. Explicit full URL
-        if key.startswith(("https://", "http://")):
-            self.learned_sites[key] = {"url": key, "count": 1}
-            self._save_learned_sites()
-            return key, "explicit_url"
+        known_url = self.WEBSITE_ALIASES.get(website)
 
-        # 2. Check if Voxy already learned this site from previous usage
-        entry = self.learned_sites.get(key)
-        if entry and entry.get("url"):
-            entry["count"] = entry.get("count", 1) + 1
-            self._save_learned_sites()
-            return entry["url"], f"learned (used {entry['count']} times)"
+        if known_url:
+            return known_url, "known"
 
-        # 3. First time seeing this site: resolve direct domain or top search URL,
-        # save it in memory, and open Firefox search on this first run!
-        candidate_slug = self.normalize_name(english_phonetic or key)
-        resolved_url = None
+        if website.startswith(("https://", "http://")):
+            return website, "explicit_url"
 
-        if re.match(r"^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(/.*)?$", candidate_slug):
-            verified = self._verify_website("https://" + candidate_slug)
+        if re.match(
+            r"^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(/.*)?$",
+            website
+        ):
+            url = "https://" + website
+            verified = self._verify_website(url)
+
             if verified:
-                resolved_url = verified
+                return verified, "verified_domain"
 
-        if not resolved_url and re.fullmatch(r"[a-zA-Z0-9-]+", candidate_slug):
-            slug = candidate_slug.lower()
-            for cand in (f"https://www.{slug}.com", f"https://{slug}.com"):
-                verified = self._verify_website(cand)
-                if verified:
-                    resolved_url = verified
-                    break
-
-        if not resolved_url:
-            resolved_url = self._fetch_top_search_url(english_phonetic or website)
-
-        if resolved_url:
-            self.learned_sites[key] = {"url": resolved_url, "count": 1}
-            self._save_learned_sites()
-            search_url = "https://www.google.com/search?q=" + quote_plus(website)
-            return search_url, "first_time_search (saved direct link for next time)"
-
-        return "https://www.google.com/search?q=" + quote_plus(website), "google_search"
-
-    def open_multiple_websites_same_window(self, website_actions):
-        """Opens multiple websites together as tabs inside a single Firefox window."""
-        firefox = which("firefox") or which("firefox-esr")
-        if not firefox:
-            return False, "Firefox is not installed."
-
-        urls = []
-        notes = []
-        for act in website_actions:
-            site = act.get("target") or act.get("platform")
-            phonetic = act.get("english_phonetic")
-            url, res = self._resolve_website(site, english_phonetic=phonetic)
-            if url:
-                urls.append(url)
-                notes.append(f"{site} [{res}]")
-
-        if not urls:
-            return False, "Could not resolve any of the requested websites."
-
-        try:
-            cmd = [firefox]
-            for u in urls:
-                cmd.extend(["--new-tab", u])
-
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
+            return (
+                "https://www.google.com/search?q=" + quote_plus(website),
+                "google_fallback"
             )
-            self._wait_until_actually_open(["firefox", "firefox-bin"], timeout=8.0)
-            return True, f"Opened {', '.join(notes)} in the same Firefox window."
-        except OSError as error:
-            return False, f"Could not open Firefox tabs: {error}"
+
+        if re.fullmatch(r"[a-zA-Z0-9-]+", website):
+            slug = website.lower()
+
+            for candidate in (
+                f"https://www.{slug}.com",
+                f"https://{slug}.com"
+            ):
+                verified = self._verify_website(candidate)
+
+                if verified:
+                    return verified, "dynamic_domain"
+
+        return (
+            "https://www.google.com/search?q=" + quote_plus(website),
+            "google_fallback"
+        )
 
     # =========================================
-    # MAIN EXECUTION (PARALLEL + SMART BATCHING)
+    # MAIN EXECUTION
     # =========================================
 
     def execute_actions(self, command_data, confirm_callback=None):
         if not isinstance(command_data, dict):
-            return {"success": False, "message": "Invalid command data.", "results": []}
+            return {
+                "success": False,
+                "message": "Invalid command data.",
+                "results": []
+            }
 
         actions = command_data.get("actions")
+
         if not isinstance(actions, list) or not actions:
             actions = [command_data]
 
-        valid_actions = [a for a in actions if isinstance(a, dict)]
-        if not valid_actions:
-            return {"success": False, "message": "No valid actions.", "results": []}
-
-        has_dependency = len(valid_actions) > 1 and any(
-            a.get("intent") in (
-                "create_structure", "move_item", "delete_item",
-                "click", "click_element", "type_text", "scroll"
-            )
-            for a in valid_actions
-        )
-
-        website_actions = [a for a in valid_actions if a.get("intent") == "open_website"]
-        other_actions = [a for a in valid_actions if a.get("intent") != "open_website"]
-
         results = []
 
-        if len(website_actions) >= 2:
-            ok, msg = self.open_multiple_websites_same_window(website_actions)
-            results.append({"success": ok, "intent": "open_website", "message": msg})
-            actions_to_run = other_actions
-        else:
-            actions_to_run = valid_actions
-
-        if not actions_to_run:
-            success = all(r.get("success", False) for r in results)
-            return {
-                "success": success,
-                "message": "All actions completed." if success else "One or more actions failed.",
-                "results": results
-            }
-
-        if has_dependency or len(actions_to_run) == 1:
-            for action_data in actions_to_run:
-                r = self.execute_one(action_data, confirm_callback)
-                results.append(r)
-                if r.get("needs_clarification"):
-                    break   # wait for the user's choice before running the rest
-        else:
-            with ThreadPoolExecutor(max_workers=min(6, len(actions_to_run))) as pool:
-                futures = [
-                    pool.submit(self.execute_one, action_data, confirm_callback)
-                    for action_data in actions_to_run
-                ]
-                for future in futures:
-                    results.append(future.result())
-
-        # Surface interactive clarification prompts cleanly if any action needs user input
-        for r in results:
-            if r.get("needs_clarification"):
-                return {
+        for action_data in actions:
+            if not isinstance(action_data, dict):
+                results.append({
                     "success": False,
-                    "needs_clarification": True,
-                    "message": r.get("message", "Please clarify your choice."),
-                    "results": results
-                }
+                    "message": "Invalid action."
+                })
+                continue
 
-        success = all(r.get("success", False) for r in results)
+            results.append(
+                self.execute_one(action_data, confirm_callback)
+            )
+
+        success = all(
+            result.get("success", False)
+            for result in results
+        )
+
         return {
             "success": success,
-            "message": "All actions completed." if success else "One or more actions failed.",
+            "message": (
+                "All actions completed."
+                if success else "One or more actions failed."
+            ),
             "results": results
         }
 
     def execute_one(self, data, confirm_callback=None):
         intent = str(data.get("intent", "unknown")).lower()
-        target = data.get("target") or data.get("application") or ""
+
+        target = (
+            data.get("target")
+            or data.get("application")
+            or ""
+        )
+
         query = data.get("query") or target
         action = str(data.get("action") or "").lower()
-        phonetic = data.get("english_phonetic")
 
         handlers = {
             "open_application":
-                lambda: self.open_application(target, english_phonetic=phonetic),
+                lambda: self.open_application(target),
 
             "close_application":
-                lambda: self.close_application(target, english_phonetic=phonetic),
+                lambda: self.close_application(target),
 
             "open_website":
                 lambda: self.open_website(
-                    target or data.get("platform"),
-                    english_phonetic=phonetic
+                    target or data.get("platform")
                 ),
 
             "search_web":
-                lambda: self.search_web(query, data.get("platform")),
+                lambda: self.search_web(
+                    query, data.get("platform")
+                ),
 
             "search_video":
                 lambda: self.search_video(query),
@@ -709,45 +638,39 @@ class LinuxExecutor:
                 ),
 
             "open_local_file":
-                lambda: self.open_local_file(
-                    target or query,
-                    parent_folder=data.get("parent_folder"),
-                    english_phonetic=phonetic
-                ),
-
-            "select_search_result":
-                lambda: self.select_search_result(
-                    selection=data.get("selection"),
-                    parent_hint=data.get("parent_folder") or target,
-                    confirm_callback=confirm_callback
-                ),
+                lambda: self.open_local_file(target or query),
 
             "list_directory":
                 lambda: self.list_directory(target),
 
             "click":
-                lambda: self.click_element(data),
+                lambda: self.click_element(data, confirm_callback),
 
             "click_element":
-                lambda: self.click_element(data),
+                lambda: self.click_element(data, confirm_callback),
 
             "type_text":
                 lambda: self.type_text(
                     data.get("text") or target,
-                    data.get("element_name") or data.get("element")
+                    data.get("element_name")
+                    or data.get("element")
                 ),
 
             "type_into_element":
                 lambda: self.type_text(
                     data.get("text"),
-                    data.get("element_name") or data.get("element") or target
+                    data.get("element_name")
+                    or data.get("element")
+                    or target
                 ),
 
             "list_ui_elements":
                 lambda: self.list_ui_elements_result(),
 
             "scroll":
-                lambda: self.scroll(action, data.get("amount", 3)),
+                lambda: self.scroll(
+                    action, data.get("amount", 3)
+                ),
 
             "go_back":
                 lambda: self.browser_key("Alt+Left"),
@@ -759,10 +682,14 @@ class LinuxExecutor:
                 lambda: self.browser_key("Alt+Home"),
 
             "increase_volume":
-                lambda: self.change_volume("up", data.get("amount", 5)),
+                lambda: self.change_volume(
+                    "up", data.get("amount", 5)
+                ),
 
             "decrease_volume":
-                lambda: self.change_volume("down", data.get("amount", 5)),
+                lambda: self.change_volume(
+                    "down", data.get("amount", 5)
+                ),
 
             "set_volume":
                 lambda: self.set_volume(data.get("value", 50)),
@@ -779,11 +706,13 @@ class LinuxExecutor:
                     data.get("file_name"),
                     data.get("content", ""),
                     target
-                ),
+               ),
 
             "delete_item":
                 lambda: self.delete_item(
-                    data.get("file_name") or data.get("folder_name") or target,
+                    data.get("file_name")
+                    or data.get("folder_name")
+                    or target,
                     confirm_callback
                 ),
 
@@ -794,180 +723,354 @@ class LinuxExecutor:
                 ),
 
             "conversational_response":
-                lambda: (True, data.get("response_text", "Okay."))
+                lambda: (
+                    True,
+                    data.get("response_text", "Okay.")
+                )
         }
 
         handler = handlers.get(intent)
+
         if not handler:
-            return {"success": False, "intent": intent, "message": f"Unsupported intent: {intent}"}
+            return {
+                "success": False,
+                "intent": intent,
+                "message": f"Unsupported intent: {intent}"
+            }
 
         try:
             success, message = handler()
-            if success == "clarification":
-                return {
-                    "success": False,
-                    "needs_clarification": True,
-                    "intent": intent,
-                    "message": message
-                }
-            return {"success": bool(success), "intent": intent, "message": message}
+
+            return {
+                "success": bool(success),
+                "intent": intent,
+                "message": message
+            }
+
         except Exception as error:
-            return {"success": False, "intent": intent, "message": str(error)}
+            return {
+                "success": False,
+                "intent": intent,
+                "message": str(error)
+            }
 
     def list_ui_elements_result(self):
         success, message, elements = self.list_ui_elements()
+
         if not success:
             return False, message
-        return True, json.dumps(elements, ensure_ascii=False)
+
+        return True, json.dumps(
+            elements,
+            ensure_ascii=False
+        )
 
     # =========================================
-    # OPEN & CLOSE APPLICATION / FOLDER (ACCURATE WINDOW + PROCESS CHECK)
+    # OPEN APPLICATION
     # =========================================
 
-    def open_application(self, name, english_phonetic=None):
+    def open_application(self, name):
         if not name:
             return False, "Application or website name is missing."
 
-        # 1. Check if the target is an installed app on Ubuntu FIRST
-        launch_cmd = self._find_installed_desktop_app([name, english_phonetic])
+        normalized = self.normalize_name(name)
 
-        if launch_cmd:
-            bin_name = os.path.basename(launch_cmd[0])
-            if bin_name == "ptyxis" and "--new-window" not in launch_cmd:
-                launch_cmd.append("--new-window")
+        if normalized in self.APP_ALIASES:
+            candidates = self.get_app_candidates(normalized)
+            available = []
 
-            patterns = list(set(
-                self.get_process_patterns(name)
-                + (self.get_process_patterns(english_phonetic) if english_phonetic else [])
-                + [bin_name]
-            ))
+            for candidate in candidates:
+                executable = which(candidate)
 
-            try:
-                subprocess.Popen(
-                    launch_cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True
+                if executable:
+                    available.append((candidate, executable))
+
+            if not available:
+                return self.open_website(name)
+
+            for candidate, executable in available:
+                pids = self._get_process_pids(candidate)
+                windows = self._get_process_windows(pids)
+
+                if windows:
+                    return True, f"{name} is already open."
+
+            launch_errors = []
+
+            for candidate, executable in available:
+                try:
+                    launch_command = [executable]
+
+                    if os.path.basename(executable) == "ptyxis":
+                        launch_command.append("--new-window")
+
+                    subprocess.Popen(
+                        launch_command,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True
+                    )
+                except OSError as error:
+                    launch_errors.append(str(error))
+                    continue
+
+                window = self._wait_for_app_window(
+                    [candidate], timeout=12
                 )
-                # 2. Wait until the window actually opens on screen before sending confirmation
-                opened = self._wait_until_actually_open(patterns, timeout=8.0)
-                if opened:
+
+                if window:
                     return True, f"Opened {name}."
-                return False, f"Launched {name}, but its window did not appear in time."
-            except OSError as error:
-                return False, f"Could not launch {name}: {error}"
 
-        # 3. Not found as an installed system app -> check if it's a local folder/file before web search
-        exact, fuzzy = self._fast_search_candidates([name, english_phonetic], max_depth=5)
-        matches = list(exact)
-        if re.search(r"[\u0600-\u06FF]", str(name)):
-            matches += [f for f in fuzzy if f not in exact]
-        if len(matches) == 1:
-            return self._open_path_with_xdg(matches[0])
-        elif len(matches) > 1:
-            self.last_search_candidates = matches[:10]
-            self.pending_action = "open"
-            return self._format_disambiguation_prompt(name, self.last_search_candidates)
+                if self._get_process_pids(candidate):
+                    if os.environ.get("XDG_SESSION_TYPE") == "wayland":
+                        return True, (
+                            f"{name} process launched successfully. "
+                            "Window visibility cannot be verified under Wayland."
+                        )
 
-        # 4. Not on the system at all -> fall back to self-learning website / Firefox search
-        return self.open_website(name, english_phonetic=english_phonetic)
+                    return False, (
+                        f"{name} process is running, but no visible "
+                        "application window was detected."
+                    )
 
-    def close_application(self, name, english_phonetic=None):
+            if launch_errors:
+                return False, (
+                    f"Could not launch {name}: "
+                    + "; ".join(launch_errors)
+                )
+
+            return False, f"Could not open {name}."
+
+        return self.open_website(name)
+
+    # =========================================
+    # CLOSE APPLICATION
+    # =========================================
+
+    def close_application(self, name):
         if not name:
-            return False, "Application or folder name is missing."
+            return False, "Application name is missing."
 
-        # 1. First check if there is an open folder/window matching the exact title
-        title_candidates = [name]
-        if english_phonetic:
-            title_candidates.append(english_phonetic)
+        candidates = list(set(self.get_app_candidates(name)))
+        running = []
 
-        matching_windows = self._find_windows_by_title(title_candidates)
-        if matching_windows:
-            for win_id in matching_windows:
-                if which("wmctrl"):
-                    self.run_command(["wmctrl", "-ic", win_id])
-                elif which("xdotool"):
-                    self.run_command(["xdotool", "windowclose", win_id])
-            time.sleep(0.6)
-            still_open = self._find_windows_by_title(title_candidates)
-            if not still_open:
-                return True, f"Closed {name}."
+        for candidate in candidates:
+            pids = self._get_process_pids(candidate)
 
-        # 2. Otherwise check running application processes
-        patterns = set(self.get_process_patterns(name))
-        if english_phonetic:
-            patterns.update(self.get_process_patterns(english_phonetic))
+            if pids:
+                running.append({
+                    "process": os.path.basename(candidate),
+                    "pids": pids
+                })
 
-        all_pids = set()
-        for pat in patterns:
-            all_pids.update(self._get_process_pids(pat))
+        if not running:
+            return False, f"{name} is not running."
 
-        if not all_pids:
-            return False, f"Could not find any open folder or application named '{name}'."
+        all_pids = [
+            pid for item in running for pid in item["pids"]
+        ]
 
-        windows = self._get_process_windows(list(all_pids))
+        windows = self._get_process_windows(all_pids)
+
         if windows and which("wmctrl"):
-            for win in windows:
-                self.run_command(["wmctrl", "-ic", win["id"]])
-            time.sleep(0.8)
-            if not self._get_process_windows(list(all_pids)):
+            for window in windows:
+                self.run_command([
+                    "wmctrl", "-ic", window["id"]
+                ])
+
+            time.sleep(1.5)
+
+            if not self._get_process_windows(all_pids):
                 return True, f"Closed {name}."
+
+        # Safety: never terminate all Ptyxis windows on Wayland.
+        if (
+            os.environ.get("XDG_SESSION_TYPE") == "wayland"
+            and any(item["process"] == "ptyxis" for item in running)
+        ):
+            return False, (
+                "Cannot safely close a single Ptyxis window under Wayland. "
+                "Other Terminal windows were left untouched."
+            )
 
         for pid in all_pids:
             self.run_command(["kill", "-TERM", pid])
 
-        time.sleep(0.6)
+        time.sleep(1)
 
-        remaining = set()
-        for pat in patterns:
-            remaining.update(self._get_process_pids(pat))
+        still_running = []
 
-        if remaining:
-            for pid in remaining:
-                self.run_command(["kill", "-KILL", pid])
-            time.sleep(0.3)
+        for item in running:
+            still_running.extend(
+                self._get_process_pids(item["process"])
+            )
+
+        if still_running:
+            return False, (
+                f"Could not completely close {name}. "
+                f"Remaining process IDs: {still_running}"
+            )
 
         return True, f"Closed {name}."
 
     # =========================================
-    # FIREFOX (CHECKS SYSTEM FIRST IF CALLED DIRECTLY)
+    # FIREFOX
     # =========================================
 
-    def open_website(self, website, english_phonetic=None):
+    def _get_firefox_window(self):
+        if not which("xdotool"):
+            return None
+
+        searches = [
+            [
+                "xdotool", "search", "--onlyvisible",
+                "--class", "firefox"
+            ],
+            [
+                "xdotool", "search", "--onlyvisible",
+                "--name", "Mozilla Firefox"
+            ]
+        ]
+
+        for command in searches:
+            result = self.run_command(command, timeout=3)
+
+            if result and result.returncode == 0:
+                windows = result.stdout.strip().splitlines()
+
+                if windows:
+                    return windows[-1]
+
+        return None
+
+    def _wait_for_firefox_window(self, timeout=20):
+        start = time.time()
+
+        while time.time() - start < timeout:
+            window_id = self._get_firefox_window()
+
+            if window_id:
+                return window_id
+
+            time.sleep(0.5)
+
+        return None
+
+    def open_website(self, website):
         if not website:
             return False, "No website or search term was specified."
 
-        norm_site = self.normalize_name(website)
-        if not norm_site.startswith(("http://", "https://")):
-            local_app = self._find_installed_desktop_app([website, english_phonetic])
-            if local_app:
-                return self.open_application(website, english_phonetic=english_phonetic)
+        url, resolution = self._resolve_website(website)
 
-        url, resolution = self._resolve_website(website, english_phonetic=english_phonetic)
         if not url:
             return False, "Could not resolve the requested website."
 
         firefox = which("firefox") or which("firefox-esr")
+
         if not firefox:
             return False, "Firefox is not installed."
 
+        window_id = self._get_firefox_window()
+
+        if not window_id:
+            try:
+                subprocess.Popen(
+                    [firefox, "--new-window", url],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+
+                window_id = self._wait_for_firefox_window()
+
+                if not window_id:
+                    return False, "Firefox window was not detected."
+
+                return True, (
+                    f"Firefox opened with {url} "
+                    f"(resolution: {resolution})."
+                )
+
+            except OSError as error:
+                return False, f"Could not launch Firefox: {error}"
+
+        if not which("xdotool"):
+            return False, "xdotool is required for Firefox navigation."
+
         try:
-            subprocess.Popen(
-                [firefox, "--new-tab", url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
+            activate = self.run_command([
+                "xdotool", "windowactivate",
+                "--sync", window_id
+            ])
+
+            if not activate or activate.returncode != 0:
+                return False, "Could not activate Firefox."
+
+            time.sleep(0.5)
+
+            focused = self.run_command([
+                "xdotool", "getwindowfocus"
+            ])
+
+            if not focused or focused.returncode != 0:
+                return False, "Could not verify Firefox focus."
+
+            focused_id = focused.stdout.strip()
+
+            if focused_id != window_id:
+                parent = self.run_command([
+                    "xdotool", "getwindowpid", focused_id
+                ])
+
+                expected = self.run_command([
+                    "xdotool", "getwindowpid", window_id
+                ])
+
+                if (
+                    not parent or not expected
+                    or parent.returncode != 0
+                    or expected.returncode != 0
+                    or parent.stdout.strip() != expected.stdout.strip()
+                ):
+                    return False, "Firefox could not be focused."
+
+            result = self.run_command([
+                "xdotool", "key", "--clearmodifiers", "ctrl+l"
+            ])
+
+            if not result or result.returncode != 0:
+                return False, "Could not focus Firefox address bar."
+
+            result = self.run_command([
+                "xdotool", "type",
+                "--clearmodifiers",
+                "--delay", "2",
+                "--", url
+            ], timeout=10)
+
+            if not result or result.returncode != 0:
+                return False, "Could not type website URL."
+
+            result = self.run_command([
+                "xdotool", "key", "Return"
+            ])
+
+            if not result or result.returncode != 0:
+                return False, "Could not submit website URL."
+
+            return True, (
+                f"Navigating Firefox current tab to {url} "
+                f"(resolution: {resolution})."
             )
-            self._wait_until_actually_open(["firefox", "firefox-bin"], timeout=8.0)
-            return True, f"Opened {url} in Firefox ({resolution})."
-        except OSError as error:
-            return False, f"Could not launch Firefox: {error}"
+
+        except Exception as error:
+            return False, f"Firefox navigation failed: {error}"
 
     def browser_navigate(self, url):
         return self.open_website(url)
 
     # =========================================
-    # WEB & VIDEO SEARCH
+    # WEB SEARCH
     # =========================================
 
     def search_web(self, query, platform=None):
@@ -975,25 +1078,49 @@ class LinuxExecutor:
             return False, "Search query is missing."
 
         platform = str(platform or "").lower()
+
         if platform in ("youtube", "يوتيوب"):
-            url = "https://www.youtube.com/results?search_query=" + quote_plus(query)
-        elif platform in ("google_images", "images", "صور", "google images"):
-            url = "https://www.google.com/search?tbm=isch&q=" + quote_plus(query)
+            url = (
+                "https://www.youtube.com/results?search_query="
+                + quote_plus(query)
+            )
+        elif platform in (
+            "google_images", "images", "صور", "google images"
+        ):
+            url = (
+                "https://www.google.com/search?tbm=isch&q="
+                + quote_plus(query)
+            )
         else:
-            url = "https://www.google.com/search?q=" + quote_plus(query)
+            url = (
+                "https://www.google.com/search?q="
+                + quote_plus(query)
+            )
 
         return self.browser_navigate(url)
+
+    # =========================================
+    # YOUTUBE
+    # =========================================
 
     def search_video(self, query):
         if not query:
             return False, "Video name is missing."
 
         self.last_video_query = query
-        command = ["yt-dlp"] if which("yt-dlp") else [os.sys.executable, "-m", "yt_dlp"]
+
+        command = (
+            ["yt-dlp"] if which("yt-dlp")
+            else [os.sys.executable, "-m", "yt_dlp"]
+        )
 
         result = self.run_command(
-            command + ["--flat-playlist", "--dump-single-json", f"ytsearch10:{query}"],
-            timeout=30
+            command + [
+                "--flat-playlist",
+                "--dump-single-json",
+                f"ytsearch10:{query}"
+            ],
+            timeout=40
         )
 
         self.last_video_ids = []
@@ -1002,24 +1129,44 @@ class LinuxExecutor:
         if result and result.returncode == 0:
             try:
                 payload = json.loads(result.stdout)
+
                 for entry in payload.get("entries") or []:
                     video_id = entry.get("id")
+
                     if video_id:
                         self.last_video_ids.append(video_id)
-                        self.last_video_titles.append(entry.get("title", ""))
+                        self.last_video_titles.append(
+                            entry.get("title", "")
+                        )
+
             except (json.JSONDecodeError, AttributeError):
                 pass
 
-        url = "https://www.youtube.com/results?search_query=" + quote_plus(query)
-        success, message = self.browser_navigate(url)
-        return (True, f"Showing YouTube results for {query}.") if success else (False, message)
+        url = (
+            "https://www.youtube.com/results?search_query="
+            + quote_plus(query)
+        )
 
-    def play_video(self, query=None, platform="youtube", selection=None):
+        success, message = self.browser_navigate(url)
+
+        if success:
+            return True, f"Showing YouTube results for {query}."
+
+        return False, message
+
+    def play_video(
+        self,
+        query=None,
+        platform="youtube",
+        selection=None
+    ):
         platform = str(platform).lower()
+
         if platform not in ("youtube", "يوتيوب", ""):
             return False, "Only YouTube playback is supported."
 
         video_id = None
+
         if selection is not None:
             try:
                 index = int(selection) - 1
@@ -1035,19 +1182,38 @@ class LinuxExecutor:
 
         if not video_id:
             query = query or self.last_video_query
+
             if not query:
                 return False, "Video name is missing."
 
-            command = ["yt-dlp"] if which("yt-dlp") else [os.sys.executable, "-m", "yt_dlp"]
-            result = self.run_command(
-                command + ["--no-warnings", "--skip-download", "--print", "id", f"ytsearch1:{query}"],
-                timeout=30
+            command = (
+                ["yt-dlp"] if which("yt-dlp")
+                else [os.sys.executable, "-m", "yt_dlp"]
             )
-            if not result or result.returncode != 0 or not result.stdout.strip():
+
+            result = self.run_command(
+                command + [
+                    "--no-warnings",
+                    "--skip-download",
+                    "--print",
+                    "id",
+                    f"ytsearch1:{query}"
+                ],
+                timeout=40
+            )
+
+            if (
+                not result
+                or result.returncode != 0
+                or not result.stdout.strip()
+            ):
                 return False, "Could not find the requested video."
+
             video_id = result.stdout.strip().splitlines()[0]
 
-        return self.browser_navigate("https://www.youtube.com/watch?v=" + video_id)
+        url = "https://www.youtube.com/watch?v=" + video_id
+
+        return self.browser_navigate(url)
 
     # =========================================
     # VOLUME
@@ -1056,12 +1222,15 @@ class LinuxExecutor:
     def volume_backend(self):
         if which("wpctl"):
             return "wpctl"
+
         if which("pactl"):
             return "pactl"
+
         return None
 
     def change_volume(self, direction, amount=5):
         backend = self.volume_backend()
+
         if not backend:
             return False, "No supported volume controller found."
 
@@ -1070,20 +1239,35 @@ class LinuxExecutor:
         except (ValueError, TypeError):
             amount = 5
 
-        val = f"{amount}%+" if direction == "up" else f"{amount}%-"
-        pval = f"+{amount}%" if direction == "up" else f"-{amount}%"
+        if direction == "up":
+            wpctl_value = f"{amount}%+"
+            pactl_value = f"+{amount}%"
+        else:
+            wpctl_value = f"{amount}%-"
+            pactl_value = f"-{amount}%"
 
         if backend == "wpctl":
-            result = self.run_command(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", val])
+            result = self.run_command([
+                "wpctl", "set-volume",
+                "@DEFAULT_AUDIO_SINK@", wpctl_value
+            ])
         else:
-            result = self.run_command(["pactl", "set-sink-volume", "@DEFAULT_SINK@", pval])
+            result = self.run_command([
+                "pactl", "set-sink-volume",
+                "@DEFAULT_SINK@", pactl_value
+            ])
 
         if result and result.returncode == 0:
-            return True, f"Volume {'increased' if direction == 'up' else 'decreased'} by {amount}%."
+            return True, (
+                f"Volume {'increased' if direction == 'up' else 'decreased'} "
+                f"by {amount}%."
+            )
+
         return False, "Volume change failed."
 
     def set_volume(self, value):
         backend = self.volume_backend()
+
         if not backend:
             return False, "No supported volume controller found."
 
@@ -1093,306 +1277,127 @@ class LinuxExecutor:
             return False, "Invalid volume percentage."
 
         if backend == "wpctl":
-            result = self.run_command(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{value}%"])
+            result = self.run_command([
+                "wpctl", "set-volume",
+                "@DEFAULT_AUDIO_SINK@", f"{value}%"
+            ])
         else:
-            result = self.run_command(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{value}%"])
+            result = self.run_command([
+                "pactl", "set-sink-volume",
+                "@DEFAULT_SINK@", f"{value}%"
+            ])
 
         if result and result.returncode == 0:
             return True, f"Volume set to {value}%."
+
         return False, "Could not set volume."
 
     def mute(self, enabled=True):
         backend = self.volume_backend()
+
         if not backend:
             return False, "No supported volume controller found."
 
         value = "1" if enabled else "0"
+
         if backend == "wpctl":
-            result = self.run_command(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", value])
+            result = self.run_command([
+                "wpctl", "set-mute",
+                "@DEFAULT_AUDIO_SINK@", value
+            ])
         else:
-            result = self.run_command(["pactl", "set-sink-mute", "@DEFAULT_SINK@", value])
+            result = self.run_command([
+                "pactl", "set-sink-mute",
+                "@DEFAULT_SINK@", value
+            ])
 
         if result and result.returncode == 0:
-            return True, "Volume muted." if enabled else "Volume unmuted."
+            return True, (
+                "Volume muted." if enabled else "Volume unmuted."
+            )
+
         return False, "Could not change mute state."
 
     # =========================================
-    # FAST DUAL-CANDIDATE FILE SEARCH & INTERACTIVE DISAMBIGUATION
+    # FILE SEARCH
     # =========================================
 
-    def _resolve_folder_path(self, folder_name):
-        home = Path.home().resolve()
-        raw = str(folder_name or "").strip()
-        if not raw:
-            return home
+    def search_file(self, requested):
+        requested = str(requested).strip().casefold()
 
-        mapped = self.FOLDER_ALIASES.get(raw.casefold(), raw)
-        if mapped == "":
-            return home
+        if not requested:
+            return None
 
-        candidate = Path(mapped).expanduser()
-        if not candidate.is_absolute():
-            candidate = home / candidate
-        return Path(os.path.normpath(candidate))
+        if which("locate"):
+            result = self.run_command([
+                "locate", "-i", "-l", "50", "--", requested
+            ], timeout=20)
 
-    def _skeleton(self, s):
-        """Loose Arabic spelling key: ندى / نادا / محمد / المحمد -> same key."""
-        s = str(s or "").casefold()
-        s = re.sub(r"[\u064B-\u0652\u0640]", "", s)
-        s = re.sub("[أإآٱ]", "ا", s).replace("ى", "ي").replace("ة", "ه")
-        s = re.sub(r"[\W_]+", "", s)
-        if not re.search(r"[\u0600-\u06FF]", s):
-            return s
-        if s.startswith("ال") and len(s) > 3:
-            s = s[2:]
-        sk = re.sub("[اويaeiou]", "", s)
-        return sk or s
+            if result and result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    path = Path(line)
 
-    def _xkey(self, s):
-        """Cross-script key: محمد / Mohamed / Muhammad -> 'mhmd' (consonants only)."""
-        s = str(s or "").casefold()
-        s = re.sub(r"[\u064B-\u0652\u0640]", "", s)
-        s = re.sub("[أإآٱ]", "ا", s)
-        if s.startswith("ال") and len(s) > 3:
-            s = s[2:]
-        for a, b in (("sh", "s"), ("kh", "k"), ("th", "t"), ("dh", "z"),
-                     ("gh", "j"), ("ph", "f"), ("ch", "s")):
-            s = s.replace(a, b)
-        table = {
-            "ب": "b", "ت": "t", "ث": "t", "ج": "j", "ح": "h", "خ": "k",
-            "د": "d", "ذ": "z", "ر": "r", "ز": "z", "س": "s", "ش": "s",
-            "ص": "s", "ض": "d", "ط": "t", "ظ": "z", "غ": "j", "ف": "f",
-            "ق": "k", "ك": "k", "ل": "l", "م": "m", "ن": "n", "ه": "h",
-        }
-        out = []
-        for ch in s:
-            if ch in table:
-                out.append(table[ch])
-            elif ch in "gj":
-                out.append("j")
-            elif ch in "kqc":
-                out.append("k")
-            elif ch.isdigit() or ("a" <= ch <= "z" and ch not in "aeiouyw"):
-                out.append(ch)
-        return re.sub(r"(.)\1+", r"\1", "".join(out))
+                    if path.exists():
+                        return path
 
-    def _fast_search_candidates(self, query_names, search_root=None, max_depth=5):
-        root = search_root or Path.home().resolve()
-        clean_queries = [
-            str(q).strip() for q in query_names
-            if q and str(q).strip()
-        ]
+        checked = 0
 
-        if not clean_queries or not root.exists():
-            return [], []
+        for current, dirs, files in os.walk(
+            "/",
+            topdown=True,
+            followlinks=False,
+            onerror=lambda error: None
+        ):
+            dirs[:] = [
+                directory for directory in dirs
+                if directory not in self.SKIP_DIRS
+            ]
 
-        exact_matches = []
-        fuzzy_matches = []
-        seen_paths = set()
+            checked += 1
 
-        norm_targets = {q.casefold() for q in clean_queries}
-        compact_targets = {re.sub(r"[\s_\-]+", "", q.casefold()) for q in clean_queries}
+            if checked > 100000:
+                break
 
-        for current, dirs, files in os.walk(root, followlinks=False):
-            rel_parts = Path(current).relative_to(root).parts
-            if len(rel_parts) >= max_depth:
-                dirs[:] = []
-            else:
-                dirs[:] = [
-                    d for d in dirs
-                    if not d.startswith(".") and d not in self.SKIP_DIRS
-                ]
+            for name in dirs + files:
+                if requested in name.casefold():
+                    candidate = Path(current) / name
 
-            for item in dirs + files:
-                full_path = Path(current) / item
-                if str(full_path) in seen_paths:
-                    continue
+                    if candidate.exists():
+                        return candidate
 
-                item_lower = item.casefold()
-                item_compact = re.sub(r"[\s_\-]+", "", item_lower)
-                stem_lower = Path(item).stem.casefold()
+        return None
 
-                if (
-                    item_lower in norm_targets
-                    or stem_lower in norm_targets
-                    or item_compact in compact_targets
-                ):
-                    exact_matches.append(full_path)
-                    seen_paths.add(str(full_path))
-                    continue
+    def open_local_file(self, target):
+        if not target:
+            return False, "File or folder name is missing."
 
-                is_similar = False
-                item_sk = self._skeleton(stem_lower)
-                item_xk = self._xkey(stem_lower)
-                for nt in norm_targets:
-                    nt_xk = self._xkey(nt)
-                    if len(nt_xk) >= 2 and nt_xk == item_xk:
-                        is_similar = True
-                        break
-                    nt_sk = self._skeleton(nt)
-                    if len(nt_sk) >= 2 and nt_sk == item_sk:
-                        is_similar = True
-                        break
-                    if len(nt) >= 2 and (nt in item_lower or item_lower in nt):
-                        is_similar = True
-                        break
-                    if difflib.SequenceMatcher(None, nt, item_lower).ratio() >= 0.68:
-                        is_similar = True
-                        break
+        path = Path(str(target)).expanduser()
 
-                if is_similar:
-                    fuzzy_matches.append(full_path)
-                    seen_paths.add(str(full_path))
+        found = path if path.exists() else self.search_file(target)
 
-        return exact_matches, fuzzy_matches
+        if not found:
+            return False, f"Could not find {target}."
 
-    def _open_path_with_xdg(self, path_obj):
         opener = which("xdg-open")
+
         if not opener:
             return False, "xdg-open is not installed."
+
         try:
             subprocess.Popen(
-                [opener, str(path_obj)],
+                [opener, str(found)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True
             )
-            if path_obj.is_dir():
-                self._wait_until_actually_open(["nautilus", "thunar", "dolphin"], timeout=4.0)
-            return True, f"Opened {path_obj}"
+
+            return True, f"Opening {found}."
+
         except OSError as error:
             return False, str(error)
 
-    def _format_disambiguation_prompt(self, target, candidates, verb="أفتح"):
-        """Formats a clear list showing both numbers and parent folder locations."""
-        home_path = Path.home().resolve()
-        lines = []
-        for i, p in enumerate(candidates, 1):
-            pretty = str(p).replace(str(home_path), "~")
-            parent = p.parent.name if p.parent != home_path else "Home"
-            kind = "Folder" if p.is_dir() else "File"
-            lines.append(f"{i}. {p.name}  —  {pretty}  ({kind} inside {parent})")
-        if self.pending_action == "create":
-            header = f"لقيت أكتر من فولدر قريب لـ '{target}'، تحب أنشئ فيه أنهي واحد؟"
-        else:
-            header = f"لقيت أكتر من اسم قريب لـ '{target}'، تحب {verb} أنهي واحد؟"
-        msg = (
-            header + "\n"
-            + "\n".join(lines)
-            + "\n(قول: 'رقم 1' أو 'اللي في Desktop')"
-        )
-        return "clarification", msg
-
-    def open_local_file(self, target, parent_folder=None, english_phonetic=None):
-        if not target:
-            return False, "File or folder name is missing."
-
-        self.last_search_candidates = []
-        self.pending_action = None
-
-        # Case A: User specified a parent folder (e.g., "open OS inside Home")
-        if parent_folder:
-            parent_path = self._resolve_folder_path(parent_folder)
-            if not parent_path.exists():
-                p_exact, _ = self._fast_search_candidates([parent_folder], max_depth=3)
-                if p_exact:
-                    parent_path = p_exact[0]
-
-            if parent_path.exists() and parent_path.is_dir():
-                exact, fuzzy = self._fast_search_candidates(
-                    [target, english_phonetic], search_root=parent_path, max_depth=2
-                )
-                matches = exact + [f for f in fuzzy if f not in exact]
-                if len(matches) == 1:
-                    return self._open_path_with_xdg(matches[0])
-                elif len(matches) > 1:
-                    self.last_search_candidates = matches[:10]
-                    self.pending_action = "open"
-                    return self._format_disambiguation_prompt(target, self.last_search_candidates)
-                else:
-                    self._open_path_with_xdg(parent_path)
-                    items = sorted(parent_path.iterdir(), key=lambda x: x.name.lower())
-                    contents = "\n".join(
-                        f"• {'[Folder]' if it.is_dir() else '[File]'} {it.name}"
-                        for it in items[:25]
-                    ) or "(Folder is empty)"
-                    return True, (
-                        f"Could not find '{target}' inside '{parent_path.name}'. "
-                        f"Opened '{parent_path.name}' instead. Here is what's inside:\n{contents}"
-                    )
-
-        # Case B: Global fast search across Home FIRST so multiple case variants (OS, os, Os, oS) are ALL caught!
-        exact, fuzzy = self._fast_search_candidates([target, english_phonetic], max_depth=5)
-        matches = exact + [f for f in fuzzy if f not in exact]
-
-        if len(matches) == 1:
-            return self._open_path_with_xdg(matches[0])
-        if len(matches) > 1:
-            self.last_search_candidates = matches[:10]
-            self.pending_action = "open"
-            return self._format_disambiguation_prompt(target, self.last_search_candidates)
-
-        return False, f"Could not find any file or folder matching '{target}'."
-
-    def _act_on_choice(self, path, confirm_callback=None):
-        mode = self.pending_action
-        pending_create = self.pending_create
-        self.last_search_candidates = []
-        self.pending_action = None
-        self.pending_create = None
-        if mode == "create" and pending_create:
-            return self.create_structure(
-                pending_create.get("folder_name"),
-                pending_create.get("file_name"),
-                pending_create.get("content", ""),
-                target=str(path),
-                resolved_base=path
-            )
-        if mode == "delete":
-            return self._delete_path(path, confirm_callback)
-        return self._open_path_with_xdg(path)
-
-    def select_search_result(self, selection=None, parent_hint=None, confirm_callback=None):
-        if not self.last_search_candidates:
-            return False, "There is no active file search list to choose from."
-        verb = "أمسح" if self.pending_action == "delete" else "أفتح"
-
-        # 1. Selection by parent folder (e.g., "اللي في Desktop")
-        if parent_hint:
-            hint_resolved = self._resolve_folder_path(parent_hint)
-            hint_cf = str(parent_hint).strip().casefold()
-            pm = [
-                c for c in self.last_search_candidates
-                if (
-                    c.parent == hint_resolved
-                    or hint_cf in c.parent.name.casefold()
-                    or hint_cf in str(c.parent).casefold()
-                )
-            ]
-            if len(pm) == 1:
-                return self._act_on_choice(pm[0], confirm_callback)
-            elif len(pm) > 1:
-                self.last_search_candidates = pm
-                return self._format_disambiguation_prompt(pm[0].name, pm, verb)
-
-        # 2. Selection by number (e.g., "رقم 2")
-        if selection is not None:
-            try:
-                idx = int(selection) - 1
-                if 0 <= idx < len(self.last_search_candidates):
-                    return self._act_on_choice(
-                        self.last_search_candidates[idx], confirm_callback
-                    )
-            except (TypeError, ValueError):
-                pass
-
-        return "clarification", (
-            f"اختار رقم من 1 لـ {len(self.last_search_candidates)} "
-            "أو قول اسم الفولدر اللي جواه (مثلاً: اللي في Desktop)."
-        )
-
     # =========================================
-    # SCROLL & BROWSER NAVIGATION
+    # SCROLL
     # =========================================
 
     def scroll(self, direction, amount=3):
@@ -1405,26 +1410,61 @@ class LinuxExecutor:
             amount = 3
 
         direction = str(direction).lower()
-        button = "4" if direction in ("up", "upward", "أعلى", "فوق") else "5"
+
+        button = (
+            "4" if direction in (
+                "up", "upward", "أعلى", "فوق"
+            ) else "5"
+        )
 
         result = self.run_command([
-            "xdotool", "click", "--repeat", str(amount), "--delay", "60", button
+            "xdotool", "click",
+            "--repeat", str(amount),
+            "--delay", "60",
+            button
         ])
+
         if result and result.returncode == 0:
-            return True, "Scrolled up." if button == "4" else "Scrolled down."
+            return True, (
+                "Scrolled up." if button == "4"
+                else "Scrolled down."
+            )
+
         return False, "Scroll failed."
+
+    # =========================================
+    # BROWSER NAVIGATION
+    # =========================================
 
     def browser_key(self, key):
         if not which("xdotool"):
             return False, "xdotool is not installed."
 
-        result = self.run_command(["xdotool", "key", "--clearmodifiers", key])
+        window_id = self._get_firefox_window()
+
+        if not window_id:
+            return False, "Firefox is not open."
+
+        activate = self.run_command([
+            "xdotool", "windowactivate",
+            "--sync", window_id
+        ])
+
+        if not activate or activate.returncode != 0:
+            return False, "Could not activate Firefox."
+
+        result = self.run_command([
+            "xdotool", "key",
+            "--clearmodifiers", key
+        ])
+
         if result and result.returncode == 0:
             return True, "Navigation command sent."
+
         return False, "Navigation failed."
 
     # =========================================
-    # CREATE, DELETE, MOVE, LIST
+    # CREATE FILE / FOLDER
     # =========================================
 
     def create_structure(
@@ -1432,89 +1472,41 @@ class LinuxExecutor:
         folder_name=None,
         file_name=None,
         content="",
-        target=None,
-        resolved_base=None
+        target=None
     ):
-        """
-        Rules:
-        - "create folder/file X" with NO destination  -> created directly in
-          Home, no question asked, and files are created EMPTY.
-        - "create folder/file X inside Y"             -> look for folders
-          similar to Y; ask only if there is more than one; use it if there
-          is exactly one; create Y inside Home if none exists.
-        """
         home = Path.home().resolve()
 
         try:
+            target_aliases = {
+                "داول لوت": "Downloads",
+                "داونلودز": "Downloads",
+                "downloads": "Downloads",
+                "desktop": "Desktop",
+                "documents": "Documents"
+            }
+
             raw_target = str(target or "").strip()
-            folder_name = str(folder_name).strip() if folder_name else None
-            file_name = str(file_name).strip() if file_name else None
+            base_name = target_aliases.get(
+                raw_target.casefold(),
+                raw_target
+            )
 
-            def _same(a, b):
-                return bool(a and b) and a.casefold() in (
-                    b.casefold(), Path(b).stem.casefold()
-                )
+            base_folder = (
+                Path(base_name).expanduser()
+                if base_name else home
+            )
 
-            # The model sometimes repeats the NEW item's own name as "target".
-            # That is not a destination -> ignore it.
-            if raw_target and (_same(raw_target, file_name) or _same(raw_target, folder_name)):
-                raw_target = ""
-
-            # A file + a folder name but no explicit destination:
-            # the folder is where the file should go ("create a.txt in docs").
-            destination = raw_target
-            new_folder = folder_name
-            if file_name and folder_name and not raw_target:
-                destination = folder_name
-                new_folder = None
-
-            # Home / Desktop / Downloads ... are fixed aliases: no question.
-            dest_key = destination.casefold()
-            is_alias = dest_key in self.FOLDER_ALIASES
-            is_path = "/" in destination or destination.startswith("~")
-
-            # ---- No destination at all: straight into Home, EMPTY file ----
-            if not destination and resolved_base is None:
-                resolved_base = home
-                content = ""
-
-            # ---- Destination given: search similar folders, ask if many ----
-            if destination and resolved_base is None and not is_alias and not is_path:
-                exact, fuzzy = self._fast_search_candidates([destination], max_depth=4)
-                seen, unique = set(), []
-                for d in [p for p in exact + fuzzy if p.is_dir()]:
-                    if d not in seen:
-                        seen.add(d)
-                        unique.append(d)
-
-                if len(unique) > 1:
-                    self.last_search_candidates = unique[:10]
-                    self.pending_action = "create"
-                    self.pending_create = {
-                        "folder_name": new_folder,
-                        "file_name": file_name,
-                        "content": content,
-                    }
-                    return self._format_disambiguation_prompt(
-                        destination, self.last_search_candidates
-                    )
-                if len(unique) == 1:
-                    resolved_base = unique[0]
-
-            if resolved_base is not None:
-                base_folder = Path(resolved_base)
-            else:
-                base_name = self.FOLDER_ALIASES.get(dest_key, destination)
-                base_folder = Path(base_name).expanduser() if base_name else home
-                if not base_folder.is_absolute():
-                    base_folder = home / base_folder
+            if not base_folder.is_absolute():
+                base_folder = home / base_folder
 
             base_folder = base_folder.resolve()
 
             if home not in (base_folder, *base_folder.parents):
                 return False, "Target folder must be inside home directory."
 
-            folder = (base_folder / new_folder if new_folder else base_folder).resolve()
+            folder = (
+                base_folder / folder_name if folder_name else base_folder
+            ).resolve()
 
             if base_folder not in (folder, *folder.parents):
                 return False, "Invalid folder path."
@@ -1523,10 +1515,19 @@ class LinuxExecutor:
 
             if file_name:
                 file_path = (folder / file_name).resolve()
+
                 if folder not in file_path.parents:
                     return False, "Invalid file path."
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                file_path.write_text(str(content or ""), encoding="utf-8")
+
+                file_path.parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+
+                file_path.write_text(
+                    str(content or ""),
+                    encoding="utf-8"
+                )
+
                 return True, f"Created file: {file_path}"
 
             return True, f"Created folder: {folder}"
@@ -1535,14 +1536,22 @@ class LinuxExecutor:
             return False, str(error)
 
     def _find_items_in_home(self, name, max_depth=4):
+        """Find files/folders inside the home directory by exact name.
+
+        The match ignores capital/small letters, so "os" and "OS"
+        refer to the same name. Only the home directory is searched.
+        """
         home = Path.home().resolve()
         requested = str(name).strip().rstrip("/")
+
         if not requested:
             return []
 
         candidate = Path(requested).expanduser()
+
         if not candidate.is_absolute():
             candidate = home / candidate
+
         candidate = Path(os.path.normpath(candidate))
 
         if candidate.exists() or candidate.is_symlink():
@@ -1557,61 +1566,50 @@ class LinuxExecutor:
                     matches.append(Path(current) / item)
 
             depth = len(Path(current).relative_to(home).parts)
+
             if depth >= max_depth - 1:
                 dirs[:] = []
             else:
                 dirs[:] = [
-                    d for d in dirs
-                    if not d.startswith(".") and d not in self.SKIP_DIRS
+                    directory for directory in dirs
+                    if not directory.startswith(".")
+                    and directory not in self.SKIP_DIRS
                 ]
 
         return matches
-
-    def _is_protected(self, path):
-        home = Path.home().resolve()
-        protected = {home} | {
-            home / n for n in (
-                "Desktop", "Documents", "Downloads",
-                "Pictures", "Music", "Videos"
-            )
-        }
-        parent = path.parent.resolve()
-        return (parent != home and home not in parent.parents) or path in protected
 
     def delete_item(self, target, confirm_callback=None):
         if not target:
             return False, "Target is missing."
 
-        self.last_search_candidates = []
-        self.pending_action = None
         home = Path.home().resolve()
+        matches = self._find_items_in_home(target)
 
-        cands = []
-        explicit = Path(str(target)).expanduser()
-        if not explicit.is_absolute():
-            explicit = home / explicit
-        if "/" in str(target) and explicit.exists():
-            cands.append(Path(os.path.normpath(explicit)))
-
-        exact, fuzzy = self._fast_search_candidates([target], max_depth=4)
-        for p in exact + fuzzy:
-            if p not in cands:
-                cands.append(p)
-        cands = [p for p in cands if not self._is_protected(p)]
-
-        if not cands:
+        if not matches:
             return False, f"Could not find {target} in your home folder."
-        if len(cands) == 1:
-            return self._delete_path(cands[0], confirm_callback)
 
-        self.last_search_candidates = cands[:10]
-        self.pending_action = "delete"
-        return self._format_disambiguation_prompt(
-            target, self.last_search_candidates, verb="أمسح"
-        )
+        if len(matches) > 1:
+            shown = ", ".join(str(match) for match in matches[:5])
 
-    def _delete_path(self, path, confirm_callback=None):
-        if self._is_protected(path):
+            return False, (
+                f"Found {len(matches)} items named {target}: "
+                f"{shown}. Please say which one."
+            )
+
+        path = matches[0]
+        parent = path.parent.resolve()
+
+        protected = {home} | {
+            home / name for name in (
+                "Desktop", "Documents", "Downloads",
+                "Pictures", "Music", "Videos"
+            )
+        }
+
+        if (
+            (parent != home and home not in parent.parents)
+            or path in protected
+        ):
             return False, "This item cannot be deleted."
 
         if confirm_callback is None:
@@ -1628,6 +1626,7 @@ class LinuxExecutor:
         try:
             if which("gio"):
                 result = self.run_command(["gio", "trash", str(path)])
+
                 if result and result.returncode == 0:
                     return True, f"Moved {path} to Trash."
 
@@ -1670,16 +1669,20 @@ class LinuxExecutor:
                     pass
 
             new_path = destination_resolved / source.name
+
             if new_path.exists() or new_path.is_symlink():
                 return False, "An item with the same name already exists."
 
             shutil.move(str(source), str(new_path))
+
             return True, f"Moved {source.name} to {destination_resolved}."
 
         except FileNotFoundError:
             return False, "Source or destination was not found."
+
         except ValueError:
             return False, "Moving items outside your Home folder is not allowed."
+
         except OSError as error:
             return False, str(error)
 
@@ -1688,7 +1691,10 @@ class LinuxExecutor:
             return False, "Folder path is missing."
 
         home = Path.home().resolve()
-        folder = self._resolve_folder_path(target)
+        folder = Path(str(target)).expanduser()
+
+        if not folder.is_absolute():
+            folder = home / folder
 
         try:
             folder = folder.resolve(strict=True)
@@ -1698,6 +1704,7 @@ class LinuxExecutor:
                 return False, "The requested path is not a folder."
 
             items = sorted(folder.iterdir(), key=lambda item: item.name.lower())
+
             if not items:
                 return True, "The folder is empty."
 
@@ -1705,11 +1712,14 @@ class LinuxExecutor:
                 f"{'[Folder]' if item.is_dir() else '[File]'} {item.name}"
                 for item in items
             ]
+
             return True, "Contents of " + str(folder) + ":\n" + "\n".join(lines)
 
         except FileNotFoundError:
             return False, "Folder not found."
+
         except ValueError:
             return False, "Access outside your Home folder is not allowed."
+
         except OSError as error:
             return False, str(error)

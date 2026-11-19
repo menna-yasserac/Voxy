@@ -1,3 +1,4 @@
+
 import os
 import json
 from groq import Groq
@@ -78,16 +79,7 @@ Never require application names, website names, button names,
 file names or search phrases to exist in a predefined list.
 
 Preserve the target as the user intended it.
-Do not replace an unfamiliar Arabic name with English in `target`,
-because the user may actually have an Arabic-named folder or file.
-
-HOWEVER, if the target is Arabic-transcribed English letters or
-an English acronym/word written in Arabic script (for example:
-"ا و ا س" -> "OS", "او اس" -> "OS", "بي دي اف" -> "PDF",
-"سي في" -> "CV", "فوكسي" -> "Voxy"), ALSO populate
-`english_phonetic` with the likely English spelling (e.g. "OS")
-while keeping the original spoken string in `target`!
-That way the search engine searches for BOTH simultaneously.
+Do not replace an unfamiliar name with a different name.
 
 If the target is recognizable despite a likely transcription error,
 interpret it using context. If multiple interpretations are plausible,
@@ -106,8 +98,6 @@ search_web
 search_video
 play_video
 open_local_file
-select_search_result
-list_directory
 click
 click_element
 type_text
@@ -122,7 +112,6 @@ mute
 unmute
 create_structure
 delete_item
-move_item
 conversational_response
 unknown
 
@@ -220,6 +209,39 @@ If the user identifies an element through context
 (e.g. "click that button"), use the previous conversation context
 only if the reference is clear.
 
+For "click here" / "دوس هنا" / "اضغط هنا" / "click" with no element:
+- use click_element.
+- target = "here".
+- The system will click where the mouse pointer is.
+
+For the visible text of an element:
+- target = only the words written on the screen, for example
+  "Save", "Sign in", "Continue with Google".
+- Remove words such as button, link, icon, زر, لينك.
+- Keep the language of the text exactly as the user said it.
+
+For a right click or a double click:
+- use click_element.
+- action = "right_click" for "right click" / "كليك يمين".
+- action = "double_click" for "double click" / "دبل كليك".
+- For a normal click leave action empty.
+
+Examples:
+"دوس هنا"
+{"intent":"click_element","target":"here"}
+
+"Click the Save button"
+{"intent":"click_element","target":"Save"}
+
+"اضغط على Sign in"
+{"intent":"click_element","target":"Sign in"}
+
+"Right click Documents"
+{"intent":"click_element","target":"Documents","action":"right_click"}
+
+"دبل كليك على Downloads"
+{"intent":"click_element","target":"Downloads","action":"double_click"}
+
 IMPORTANT:
 Understanding a screen element does not mean that its location
 is known. Never fabricate coordinates.
@@ -298,13 +320,8 @@ do not assume it means volume.
 Do not confuse volume commands with media playback commands.
 
 ==================================================
-10. FILES, FOLDERS, AND DISAMBIGUATION SELECTION
+10. FILES AND FOLDERS
 ==================================================
-
-Selecting from a previous file/folder disambiguation list:
-- If `has_pending_file_selection` is true in context and the user says
-  "رقم 2", "التاني", "اختار 1", "open the second one", "number 3", etc.:
-  Return intent = "select_search_result" and selection = integer (1-based index).
 
 Use list_directory when the user asks to list, show, or
 display the contents of a folder.
@@ -321,11 +338,6 @@ target = "Downloads"
 
 Use open_local_file when the user asks to open a local file
 or folder.
-- If the user specifies a folder inside a parent folder, e.g.:
-  "افتح OS اللي جوه Home" or "open OS inside Desktop":
-  Set `target` = "OS" and `parent_folder` = "Home" (or "Desktop").
-  This lets the executor open the parent folder and list its contents
-  as a fallback if the child folder is not found inside it.
 
 Use create_structure when the user asks to create a file or folder.
 
@@ -360,7 +372,6 @@ Normalize common Arabic spoken names of standard Linux folders:
 - "داول لوت", "داونلودز", "داون لود" -> "Downloads"
 - "ديسكتوب" -> "Desktop"
 - "دوكيومنتس" -> "Documents"
-- "هوم", "الهوم" -> "Home"
 
 Preserve user-created folder names. Do not confuse the new folder name
 (folder_name) with its parent destination (target).
@@ -371,13 +382,6 @@ Example:
 Return:
 target = "Downloads"
 folder_name = "Projects"
-
-Compound Create + Open:
-If the user asks to create a folder/file and immediately open it,
-e.g. "اعمل فولدر اسمه Test جوه Downloads وافتحه":
-Return two actions in order:
-1) intent = "create_structure", target = "Downloads", folder_name = "Test"
-2) intent = "open_local_file", target = "Test", parent_folder = "Downloads"
 
 ==================================================
 11. MULTIPLE ACTIONS
@@ -490,8 +494,6 @@ Use exactly this structure for the main result:
 {
   "intent": "intent_name",
   "target": null,
-  "parent_folder": null,
-  "english_phonetic": null,
   "application": null,
   "platform": null,
   "query": null,
@@ -545,12 +547,8 @@ class CommandUnderstanding:
             "last_video_search_query": None,
             "last_application": None,
             "last_website": None,
-            "last_screen_element": None,
-            "has_pending_file_selection": False
+            "last_screen_element": None
         }
-
-    def set_pending_file_selection(self, pending: bool):
-        self.conversation_context["has_pending_file_selection"] = bool(pending)
 
     # =====================================
     # UNDERSTAND COMMAND
@@ -632,7 +630,7 @@ Return the required JSON structure only.
             ):
                 continue
 
-            for field in ("folder_name", "file_name", "target", "parent_folder"):
+            for field in ("folder_name", "file_name", "target"):
                 value = action.get(field)
 
                 if isinstance(value, str) and value:
@@ -646,8 +644,6 @@ Return the required JSON structure only.
         return {
             "intent": "unknown",
             "target": None,
-            "parent_folder": None,
-            "english_phonetic": None,
             "application": None,
             "platform": None,
             "query": None,
@@ -688,7 +684,6 @@ Return the required JSON structure only.
             "search_video",
             "play_video",
             "open_local_file",
-            "select_search_result",
             "list_directory",
             "click",
             "click_element",
