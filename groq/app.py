@@ -2,18 +2,12 @@
 """
 Voxy - Linux AI Assistant (new GUI)
 
-Same backend as before (audio_service_AI, command_understanding, execution).
-Only the GUI layer was rewritten: new look, animated logo, mic rings,
-live level meter, rounded buttons, same Home / History / Settings pages.
-
-Optional: `pip install sounddevice` for a REAL microphone level on the
-animations. Without it the animation falls back to a smooth simulated level.
+Same backend (audio_service_AI, command_understanding, execution).
+Voice feedback is integrated directly inside audio_service_AI and hooked here.
 """
-
 import math
 import os
 import random
-import re
 import threading
 import time
 import traceback
@@ -24,12 +18,16 @@ import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+
+import audio_service_AI
 from audio_service_AI import listen_and_transcribe
 from command_understanding import CommandUnderstanding
 from execution import LinuxExecutor
-from dotenv import load_dotenv
 
-# تحميل ملف .env سواء كان جنب الملف أو في الفولدر الأب
 load_dotenv(Path(__file__).resolve().parent / ".env")
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -38,42 +36,8 @@ try:
 except Exception:
     sd = None
 
-# Arabic shaping + right-to-left ordering for Tk (pip install arabic-reshaper python-bidi)
-try:
-    import arabic_reshaper
-    from bidi.algorithm import get_display
-except Exception:
-    arabic_reshaper = None
-    get_display = None
-
-_AR_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
-
-
-def has_arabic(text):
-    return bool(_AR_RE.search(str(text or "")))
-
-
-def ar(text):
-    """Make Arabic text display correctly in Tk (display only, never for parsing)."""
-    text = "" if text is None else str(text)
-    if arabic_reshaper is None or not has_arabic(text):
-        return text
-    lines = []
-    for line in text.split("\n"):
-        if has_arabic(line):
-            try:
-                line = get_display(arabic_reshaper.reshape(line))
-            except Exception:
-                pass
-        lines.append(line)
-    return "\n".join(lines)
-
-
-# Set to False if reading the mic for the animation ever conflicts with
-# audio_service_AI on your machine (the animation then uses a simulated level).
 LIVE_MIC_LEVEL = True
 
-# Example commands shown as chips under the input. Replace with your own.
 CHIPS = ["Open Firefox", "Create a folder", "What time is it?"]
 
 # =====================================
@@ -248,18 +212,15 @@ class Stage(tk.Canvas):
         self._text = None
         cx, bg = self.cx, P["bg"]
 
-        # soft pink glow behind the logo
         self.glow = [self.create_oval(0, 0, 1, 1, fill=bg, outline="")
                      for _ in range(7)]
 
-        # 16 bars behind the V
         self.bars = [
             self.create_line(0, 0, 0, 0, width=6, capstyle="round",
                              fill=blend(grad(i / 15), bg, 0.5))
             for i in range(16)
         ]
 
-        # the V (gradient, round caps)
         for leg in ((68, 20, 100, 100), (100, 100, 132, 20)):
             for s in range(12):
                 a, b = s / 12, (s + 1) / 12
@@ -273,7 +234,6 @@ class Stage(tk.Canvas):
                     width=16, capstyle="round", fill=grad(t), tags="vlogo"
                 )
 
-        # VOXY title with gradient letters
         title_font = tkfont.Font(family=family, size=26, weight="bold")
         letters, gap = "VOXY", 7
         widths = [title_font.measure(c) for c in letters]
@@ -283,7 +243,6 @@ class Stage(tk.Canvas):
                              fill=grad(i / 3 * 0.55))
             x += widths[i] + gap
 
-        # status pill
         self.pill_font = tkfont.Font(family=family, size=13)
         self.pill = self.create_polygon(0, 0, 0, 0, 0, 0, smooth=True,
                                         fill=P["card"], outline=P["line"])
@@ -291,7 +250,6 @@ class Stage(tk.Canvas):
         self.pill_text = self.create_text(0, 206, anchor="w", text="",
                                           fill=P["text"], font=self.pill_font)
 
-        # mic button + rings
         my = self.MIC_Y
         self.rings = [
             self.create_oval(0, 0, 1, 1, outline=ORANGE, width=2, state="hidden")
@@ -328,20 +286,18 @@ class Stage(tk.Canvas):
         if text == self._text:
             return
         self._text = text
-        shown = ar(text)
-        w = max(300, self.pill_font.measure(shown) + 28 * 2 + 24)
+        w = max(300, self.pill_font.measure(text) + 28 * 2 + 24)
         left, cx = self.cx - w / 2, self.cx
         self.coords(self.pill, *rrect_points(left, 184, left + w, 228, 22))
         self.coords(self.dot, left + 25, 201, left + 35, 211)
         self.coords(self.pill_text, left + 49, 206)
-        self.itemconfig(self.pill_text, text=shown)
+        self.itemconfig(self.pill_text, text=text)
 
     def update_anim(self, t, state, level):
         P, cx, my = self.P, self.cx, self.MIC_Y
         pulse = 0.5 - 0.5 * math.cos(2 * math.pi * t / 4)
         dy = -6 * math.sin(2 * math.pi * t / 4)
 
-        # glow
         for j, oval in enumerate(self.glow):
             r = (150 - j * 17) * (1 + 0.10 * pulse)
             a = ((j + 1) / 7) * (0.75 + 0.25 * pulse)
@@ -349,7 +305,6 @@ class Stage(tk.Canvas):
             self.coords(oval, cx - r, cy - r * 0.6, cx + r, cy + r * 0.6)
             self.itemconfig(oval, fill=blend(P["glow"], P["bg"], a))
 
-        # bars
         for i, h in enumerate(BAR_HEIGHTS):
             if state == "listening":
                 e = abs(math.sin(t * 6.0 + i * 0.85))
@@ -364,11 +319,9 @@ class Stage(tk.Canvas):
             c = self.oy + 60 + dy
             self.coords(self.bars[i], x, c - half + 3, x, c + half - 3)
 
-        # float the V together with the bars
         self.move("vlogo", 0, dy - self._dy)
         self._dy = dy
 
-        # status dot
         if state == "listening":
             a = 0.3 + 0.7 * (0.5 + 0.5 * math.cos(2 * math.pi * t / 1.2))
             dot = blend(ORANGE, P["card"], a)
@@ -378,7 +331,6 @@ class Stage(tk.Canvas):
             dot = P["muted"]
         self.itemconfig(self.dot, fill=dot)
 
-        # expanding rings while listening
         for k, ring in enumerate(self.rings):
             if state == "listening":
                 p = ((t / 2.4) + k * 0.5) % 1.0
@@ -446,8 +398,8 @@ class VoxyApp(tk.Tk):
         super().__init__()
 
         self.title("Voxy - Linux AI Assistant")
-        self.geometry("1100x800")
-        self.minsize(880, 700)
+        self.geometry("1100x740")
+        self.minsize(880, 660)
 
         families = set(tkfont.families())
         self.family = next(
@@ -463,11 +415,16 @@ class VoxyApp(tk.Tk):
         self.history = []
         self.current_page = "Home"
 
-        self.sound_feedback = False
+        self.sound_feedback = True
         self.confirm_before_action = True
 
         self._audio_busy = False
         self.continuous_listening = True
+
+        # voice feedback bookkeeping (integrated in audio_service_AI)
+        self._voice_last_command = ""
+        self._voice_last_status = None
+        self._voice_proc_token = None
 
         api_key = os.environ.get("GROQ_API_KEY")
 
@@ -478,16 +435,18 @@ class VoxyApp(tk.Tk):
             )
 
         self.command_engine = CommandUnderstanding(api_key)
-        self.execution = LinuxExecutor()
+        self.execution = LinuxExecutor(understanding_engine=self.command_engine)
 
         self.language = tk.StringVar(value="English")
         self.status_message = tk.StringVar(value="How Can I Help You Today ?")
         self.command_var = tk.StringVar()
         self.status_message.trace_add("write", self._on_status)
 
+        self._vf("set_voice_enabled", self.sound_feedback)
+
         # visual state: "idle" | "listening" | "processing"
         self.ui_state = "idle"
-        self.notice = None  # result / clarification / error card shown under the stage
+        self.notice = None
 
         self.stage = None
         self.side_card = None
@@ -520,8 +479,59 @@ class VoxyApp(tk.Tk):
     def f(self, size, weight="normal"):
         return (self.family, size, weight)
 
+    # -------------------------------------
+    # voice feedback helpers (via audio_service_AI)
+    # -------------------------------------
+
+    def _vf(self, name, *args, **kwargs):
+        """Call audio_service_AI.<name>; can never raise into the GUI."""
+        fn = getattr(audio_service_AI, name, None)
+        if fn is None:
+            return None
+        try:
+            return fn(*args, **kwargs)
+        except Exception as error:
+            print("[Voice] ignored error:", repr(error), flush=True)
+            return None
+
+    def _voice_announce_result(self, success, message, spoken_override=None):
+        if not self.sound_feedback:
+            self._voice_last_status = None
+            return
+
+        status = self._voice_last_status
+        command = self._voice_last_command
+        self._voice_last_status = None
+
+        if status in ("Needs Clarification", "Needs Confirmation"):
+            self._vf("speak_clarification", spoken_override or message, context=command)
+        elif success:
+            self._vf("speak_success", text=spoken_override, context=command)
+        else:
+            self._vf("speak_error", text=spoken_override, context=command)
+
+    def _voice_schedule_processing_hint(self, command):
+        if not self.sound_feedback:
+            return
+        token = object()
+        self._voice_proc_token = token
+        self.after(6000, self._voice_processing_hint, token, command)
+
+    def _voice_processing_hint(self, token, command):
+        if (
+            self.sound_feedback
+            and self.ui_state == "processing"
+            and self._voice_proc_token is token
+            and not self._vf("is_speaking")
+        ):
+            self._vf("speak_status", context=command)
+
     def _on_close(self):
+        # مسح محتوى ملف auto_save.txt عند انتهاء الجلسة
+        if hasattr(self.execution, "clear_auto_save"):
+            self.execution.clear_auto_save()
         self.mic_level.stop()
+        self._vf("shutdown_voice")
         self.destroy()
 
     def _on_status(self, *args):
@@ -581,7 +591,6 @@ class VoxyApp(tk.Tk):
         self.sidebar.pack_propagate(False)
         tk.Frame(self.body, bg=P["side_line"], width=1).pack(side="left", fill="y")
 
-        # logo mark + name
         logo = tk.Canvas(self.sidebar, width=44, height=30, bg=P["side"],
                          highlightthickness=0)
         logo.pack(pady=(26, 0))
@@ -614,7 +623,6 @@ class VoxyApp(tk.Tk):
         self.side_card = SideCard(self.sidebar, P, self.family)
         self.side_card.pack(pady=(0, 20))
 
-        # right side: top bar + content
         main = tk.Frame(self.body, bg=P["bg"])
         main.pack(side="left", fill="both", expand=True)
 
@@ -711,7 +719,7 @@ class VoxyApp(tk.Tk):
         else:
             self._input_row(self.bottom)
 
-    def _input_row(self, parent, show_chips=True):
+    def _input_row(self, parent):
         P = self.P
 
         row = tk.Frame(parent, bg=P["bg"])
@@ -735,9 +743,6 @@ class VoxyApp(tk.Tk):
         entry.bind("<FocusOut>", lambda e: box.itemconfig(outline, outline=P["line"]))
 
         self._btn(row, "Run", self.submit_command, 96, 48, P["bg"]).pack(side="left")
-
-        if not show_chips:
-            return
 
         chips = tk.Frame(parent, bg=P["bg"])
         chips.pack(pady=(16, 0))
@@ -776,34 +781,30 @@ class VoxyApp(tk.Tk):
             badge_char = "!"
             title_color = RED
 
-        if not is_clarification:
-            icon = tk.Canvas(card, width=48, height=48, bg=P["bg"],
-                             highlightthickness=0)
-            icon.pack(pady=(0, 4))
-            icon.create_oval(2, 2, 46, 46, fill=color, outline="")
-            icon.create_text(24, 24, text=badge_char, fill="white",
-                             font=self.f(19, "bold"))
+        icon = tk.Canvas(card, width=48, height=48, bg=P["bg"],
+                         highlightthickness=0)
+        icon.pack(pady=(0, 4))
+        icon.create_oval(2, 2, 46, 46, fill=color, outline="")
+        icon.create_text(24, 24, text=badge_char, fill="white",
+                         font=self.f(19, "bold"))
 
-        tk.Label(card, text=ar(n["title"]), fg=title_color,
+        tk.Label(card, text=n["title"], fg=title_color,
                  bg=P["bg"], font=self.f(13, "bold")).pack()
-        tk.Label(card, text=ar(n["message"]), fg=P["text"], bg=P["bg"],
-                 font=self.f(11), wraplength=640,
-                 justify="right" if has_arabic(n["message"]) else "left"
-                 ).pack(pady=(6, 10))
+        tk.Label(card, text=n["message"], fg=P["text"], bg=P["bg"],
+                 font=self.f(11), wraplength=580,
+                 justify="left").pack(pady=(6, 10))
 
         btn_row = tk.Frame(card, bg=P["bg"])
+        btn_row.pack()
 
         if is_clarification:
-            # Input box right below the list, then Cancel (no chips: saves height)
-            self._input_row(card, show_chips=False)
-            btn_row.pack(pady=(10, 0))
+            self._input_row(card)
             self._btn(
                 btn_row, "Cancel", self._dismiss_notice, 120, 36, P["bg"],
                 fill=P["card"], hover=P["hover"], fg=P["muted"],
                 outline=P["line"], size=10
-            ).pack()
+            ).pack(pady=(8, 0))
         else:
-            btn_row.pack()
             self._btn(
                 btn_row, n["button"], n["command"], 180, 40, P["bg"],
                 fill=P["card"], hover=P["hover"], fg=P["text"],
@@ -811,9 +812,14 @@ class VoxyApp(tk.Tk):
             ).pack()
 
     def _dismiss_notice(self):
+        self._vf("stop_speaking")
         self.notice = None
-        if hasattr(self.execution, "last_search_candidates"):
+        if hasattr(self.execution, "_sync_pending_candidates"):
+            self.execution._sync_pending_candidates([])
+        elif hasattr(self.execution, "last_search_candidates"):
             self.execution.last_search_candidates = []
+        if hasattr(self.execution, "clear_pending_confirmation"):
+            self.execution.clear_pending_confirmation()
         if hasattr(self.command_engine, "set_pending_file_selection"):
             self.command_engine.set_pending_file_selection(False)
         self._render_bottom()
@@ -827,9 +833,10 @@ class VoxyApp(tk.Tk):
         if self._audio_busy:
             return
 
+        self._vf("stop_speaking")
+
         self._audio_busy = True
         self.ui_state = "listening"
-        # Keep clarification list visible if waiting for user's choice!
         if not (self.notice and self.notice.get("clarification")):
             self.notice = None
             self._render_bottom()
@@ -900,6 +907,12 @@ class VoxyApp(tk.Tk):
 
         self.status_message.set("Listening error. Please try again.")
 
+        # لو في سؤال توضيحي أو تأكيد معلق، نحافظ عليه ونكمل الاستماع في نفس اللوب
+        if self.notice and self.notice.get("clarification"):
+            if self.continuous_listening:
+                self.after(1500, self._resume_listening)
+            return
+
         self.notice = {
             "ok": False,
             "clarification": False,
@@ -915,11 +928,14 @@ class VoxyApp(tk.Tk):
 
     def _resume_listening(self):
 
+        if self._vf("is_speaking"):
+            self.after(300, self._resume_listening)
+            return
+
         if (
             self.continuous_listening
             and not self._audio_busy
             and self.current_page == "Home"
-            and not (self.notice and self.notice.get("clarification"))
         ):
 
             self.start_listening()
@@ -943,50 +959,20 @@ class VoxyApp(tk.Tk):
     def _processing_screen(self, command):
 
         self.ui_state = "processing"
-        self.notice = None
+        if not (self.notice and self.notice.get("clarification")):
+            self.notice = None
+            self._render_bottom()
+
         self.status_message.set("Processing your command…")
-        self._render_bottom()
+
+        self._voice_last_command = command
+        self._voice_schedule_processing_hint(command)
 
         threading.Thread(
             target=self._execute_real_pipeline,
             args=(command,),
             daemon=True
         ).start()
-
-    # =====================================
-    # SECURITY CONFIRMATION
-    # =====================================
-
-    def request_delete_confirmation(self, item_name):
-
-        if not self.confirm_before_action:
-            return True
-
-        result = {"confirmed": False}
-        finished = threading.Event()
-
-        def show_dialog():
-
-            try:
-
-                result["confirmed"] = messagebox.askyesno(
-                    "Security Confirmation",
-                    (
-                        "Are you sure you want to delete "
-                        f"this item?\n\n{item_name}"
-                    ),
-                    parent=self
-                )
-
-            finally:
-                finished.set()
-
-        self.after(0, show_dialog)
-
-        if not finished.wait(timeout=120):
-            return False
-
-        return result["confirmed"]
 
     # =====================================
     # PIPELINE HELPERS
@@ -997,7 +983,7 @@ class VoxyApp(tk.Tk):
         if not isinstance(result, dict):
             return str(result)
 
-        if result.get("needs_clarification"):
+        if result.get("needs_clarification") or result.get("needs_confirmation"):
             return str(result.get("message", "Please clarify your choice."))
 
         message = result.get("message", "")
@@ -1043,6 +1029,7 @@ class VoxyApp(tk.Tk):
     def _execute_real_pipeline(self, command):
 
         needs_clarification = False
+        spoken_override = None
 
         try:
 
@@ -1069,6 +1056,7 @@ class VoxyApp(tk.Tk):
                 )
 
             actions = structured_json.get("actions") or []
+            spoken_override = structured_json.get("spoken_feedback")
 
             # Step 2: Clarification from LLM
             if structured_json.get("needs_clarification"):
@@ -1083,7 +1071,17 @@ class VoxyApp(tk.Tk):
 
                 status = "Needs Clarification"
 
-            # Step 3: Unknown command with no actions
+            # Step 3: Conversational response
+            elif (
+                structured_json.get("intent") == "conversational_response"
+                and not actions
+            ):
+                success = True
+                message = structured_json.get("response_text") or "Okay."
+                spoken_override = structured_json.get("spoken_feedback") or message
+                status = "Success"
+
+            # Step 4: Unknown command with no actions
             elif (
                 structured_json.get("intent") == "unknown"
                 and not actions
@@ -1098,7 +1096,7 @@ class VoxyApp(tk.Tk):
 
                 status = "Failed"
 
-            # Step 4: Validate actions
+            # Step 5: Validate actions
             elif actions and not all(
                 isinstance(action, dict)
                 and action.get("intent")
@@ -1122,10 +1120,10 @@ class VoxyApp(tk.Tk):
                     flush=True
                 )
 
-                # Step 5: Execute
+                # Step 6: Execute (Universal Voice Confirmation works via speech, no blocking popup)
                 result = self.execution.execute_actions(
                     structured_json,
-                    confirm_callback=self.request_delete_confirmation
+                    speak_feedback=False
                 )
 
                 print(
@@ -1141,17 +1139,31 @@ class VoxyApp(tk.Tk):
                         f"{type(result).__name__}"
                     )
 
-                # Sync pending file/folder disambiguation state with CommandUnderstanding
                 has_pending = bool(
                     getattr(self.execution, "last_search_candidates", None)
                 )
                 if hasattr(self.command_engine, "set_pending_file_selection"):
-                    self.command_engine.set_pending_file_selection(has_pending)
+                    self.command_engine.set_pending_file_selection(
+                        has_pending,
+                        getattr(self.execution, "last_search_candidates", []),
+                        operation=getattr(self.execution, "pending_operation", None),
+                        extra={
+                            k: v for k, v in getattr(self.execution, "pending_extra", {}).items()
+                            if k != "confirm_callback"
+                        }
+                    )
 
-                if result.get("needs_clarification"):
+                if result.get("needs_confirmation"):
                     success = False
                     needs_clarification = True
                     message = self._format_execution_result(result)
+                    spoken_override = "متأكدة إنك عايزة تكملي العملية دي؟ قولي موافقة أو إلغاء."
+                    status = "Needs Confirmation"
+                elif result.get("needs_clarification"):
+                    success = False
+                    needs_clarification = True
+                    message = self._format_execution_result(result)
+                    spoken_override = "لقيت أكتر من مسار، اختاري اللي عايزاه من القائمة."
                     status = "Needs Clarification"
                 else:
                     success = bool(result.get("success", False))
@@ -1185,6 +1197,8 @@ class VoxyApp(tk.Tk):
             flush=True
         )
 
+        self._voice_last_status = status
+
         self.after(
             0,
             self._add_history,
@@ -1197,32 +1211,37 @@ class VoxyApp(tk.Tk):
             self._result_screen,
             success,
             message,
-            needs_clarification
+            needs_clarification,
+            spoken_override
         )
 
     # =====================================
     # RESULT
     # =====================================
 
-    def _result_screen(self, success, message, needs_clarification=False):
+    def _result_screen(self, success, message, needs_clarification=False, spoken_override=None):
 
         self.ui_state = "idle"
+
+        self._voice_announce_result(success, message, spoken_override=spoken_override)
 
         if needs_clarification:
             self.notice = {
                 "ok": False,
                 "clarification": True,
-                "title": "Choose an Option",
+                "title": "Choose / Confirm (في انتظار ردك)",
                 "message": message,
                 "button": "Cancel",
                 "command": self._dismiss_notice,
             }
-            self.status_message.set("Which one did you mean?")
+            self.status_message.set("Listening for your answer…")
             self.command_var.set("")
 
             if self.current_page == "Home":
                 self._render_bottom()
-            # Do NOT auto-overwrite the screen; wait for user's voice or text choice!
+
+            # البقاء في نفس اللوب وتشغيل المايك تلقائياً بعد انتهاء النطق
+            self.after(600, self._resume_listening)
             return
 
         self.notice = {
@@ -1318,7 +1337,7 @@ class VoxyApp(tk.Tk):
 
             tk.Label(
                 row,
-                text="◉  " + ar(item["command"]),
+                text="◉  " + item["command"],
                 bg=P["card"],
                 fg=P["text"],
                 anchor="w",
@@ -1444,6 +1463,7 @@ class VoxyApp(tk.Tk):
     def _set_sound(self, value):
 
         self.sound_feedback = value
+        self._vf("set_voice_enabled", value)
         self.show_page("Settings")
 
     def _confirmation_control(self, row):

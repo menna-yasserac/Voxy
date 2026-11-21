@@ -1,7 +1,9 @@
-
 import os
+import re
 import json
 from groq import Groq
+
+from audio_service_AI import clean_text, detect_language
 
 
 SYSTEM_PROMPT = """
@@ -49,6 +51,7 @@ All mean increase_volume.
 "انزل تحت"
 "نزّل الصفحة"
 "هات اللي تحت"
+"اسكرول"
 
 All mean scroll down when the context refers to scrolling.
 
@@ -79,7 +82,34 @@ Never require application names, website names, button names,
 file names or search phrases to exist in a predefined list.
 
 Preserve the target as the user intended it.
-Do not replace an unfamiliar name with a different name.
+Do not replace an unfamiliar Arabic name with English in `target`,
+because the user may actually have an Arabic-named folder or file.
+
+HOWEVER, if the target is Arabic-transcribed English letters or
+an English acronym/word written in Arabic script (for example:
+"ا و ا س" -> "OS", "او اس" -> "OS", "بي دي اف" -> "PDF",
+"سي في" -> "CV", "فوكسي" -> "Voxy", "داونلودز" -> "Downloads",
+"فيسبوك" -> "facebook", "ترمنال" -> "terminal", "ترمينال" -> "terminal",
+"في اس كود" -> "vs code"),
+ALSO populate `english_phonetic` with the likely English spelling (e.g. "OS")
+while keeping the original spoken string in `target`!
+That way the search engine searches for BOTH simultaneously.
+
+SPOKEN SYMBOLS / PUNCTUATION (`symbol_variant`):
+If the target (or `english_phonetic`) contains spoken words representing symbols
+or punctuation marks (such as "underscore", "أندرسكور", "شرطة تحتية",
+"dash", "hyphen", "شرطة", "داش", "slash", "سلاش", "backslash", "باك سلاش",
+"star", "asterisk", "نجمة", "dot", "دوت", "نقطة", "at", "آت", "hash", "هاش", "شباك"):
+- Keep the literal spoken words in `target` (and `english_phonetic` if applicable).
+- ALSO populate `symbol_variant` with the symbol-substituted version
+  (for example:
+   "my underscore file" -> `target` = "my underscore file", `symbol_variant` = "my_file";
+   "project dash one" -> `target` = "project dash one", `symbol_variant` = "project-one" or "project-1";
+   "star" -> `target` = "star", `symbol_variant` = "*";
+   "نجمة" -> `target` = "نجمة", `symbol_variant` = "*").
+- If no spoken symbol words are present, set `symbol_variant` = null.
+This allows the executor to search for the literal name first, fall back to
+the symbol version as a second option, and ask the user to disambiguate if BOTH exist.
 
 If the target is recognizable despite a likely transcription error,
 interpret it using context. If multiple interpretations are plausible,
@@ -98,9 +128,13 @@ search_web
 search_video
 play_video
 open_local_file
+select_search_result
+list_directory
 click
 click_element
 type_text
+type_into_element
+list_ui_elements
 scroll
 go_back
 go_forward
@@ -112,6 +146,9 @@ mute
 unmute
 create_structure
 delete_item
+move_item
+rename_item
+confirm_action
 conversational_response
 unknown
 
@@ -126,8 +163,10 @@ Do not invent new intent names.
 ==================================================
 
 Opening:
-- If the user means a desktop application, use open_application.
-- If the user means a website or online service, use open_website.
+- Always prefer `open_application` when the user asks to open any desktop program/tool
+  (e.g., terminal, vs code, calculator, settings, files, firefox, chrome, vlc, text editor, etc.).
+  The executor checks installed desktop applications FIRST before searching the web.
+- Use `open_website` when the user means a website or online service (e.g., Facebook, YouTube, Gmail, GitHub, Google) or a URL.
 - Extract the requested name into target.
 - Do not require the name to be known in advance.
 - If the destination is unclear, ask for clarification.
@@ -195,11 +234,25 @@ Examples:
 - دوس على الزر اللي فوق.
 - افتح القائمة.
 - اضغط على Continue with Google.
+- Click here / دوس هنا / اضغط هنا.
+- Right click Save / كليك يمين على Save.
+- Double click folder / دبل كليك على folder.
 
 For a named screen element:
 - use click_element.
-- target = the element description exactly as understood.
+- target = the words written on the element (strip words like button, icon, link, زر, زرار, أيقونة).
+- Keep the language of the text exactly as the user said it.
 - Do not invent x/y coordinates.
+
+For "click here" / "دوس هنا" / "اضغط هنا" / "click" with no target:
+- use click_element.
+- target = "here".
+
+For right click or double click:
+- use click_element.
+- action = "right_click" for "right click" / "كليك يمين".
+- action = "double_click" for "double click" / "دبل كليك".
+- For a normal left click leave action null.
 
 For an explicit coordinate request:
 - use click.
@@ -208,39 +261,6 @@ For an explicit coordinate request:
 If the user identifies an element through context
 (e.g. "click that button"), use the previous conversation context
 only if the reference is clear.
-
-For "click here" / "دوس هنا" / "اضغط هنا" / "click" with no element:
-- use click_element.
-- target = "here".
-- The system will click where the mouse pointer is.
-
-For the visible text of an element:
-- target = only the words written on the screen, for example
-  "Save", "Sign in", "Continue with Google".
-- Remove words such as button, link, icon, زر, لينك.
-- Keep the language of the text exactly as the user said it.
-
-For a right click or a double click:
-- use click_element.
-- action = "right_click" for "right click" / "كليك يمين".
-- action = "double_click" for "double click" / "دبل كليك".
-- For a normal click leave action empty.
-
-Examples:
-"دوس هنا"
-{"intent":"click_element","target":"here"}
-
-"Click the Save button"
-{"intent":"click_element","target":"Save"}
-
-"اضغط على Sign in"
-{"intent":"click_element","target":"Sign in"}
-
-"Right click Documents"
-{"intent":"click_element","target":"Documents","action":"right_click"}
-
-"دبل كليك على Downloads"
-{"intent":"click_element","target":"Downloads","action":"double_click"}
 
 IMPORTANT:
 Understanding a screen element does not mean that its location
@@ -252,8 +272,10 @@ is known. Never fabricate coordinates.
 
 Use type_text when the user asks to enter or write text
 into the currently focused field or location.
-
 Put the exact requested text in text.
+
+If the user specifies a target input field/box by name (e.g., "اكتب بايثون في خانة البحث" or "type hello in Search"):
+use type_into_element with target = field name and text = requested text.
 
 Do not translate, summarize, or alter the text to be typed
 unless the user explicitly requests that.
@@ -264,18 +286,19 @@ unless the user explicitly requests that.
 
 Use scroll for requests to move the page or scrollable area.
 
-action = up or down.
+action = up or down (default "down" if user simply says "scroll" or "اسكرول").
 
 amount = a reasonable small integer.
 Use 3 by default if the user does not specify an amount.
 
 Interpret expressions such as:
-- Scroll down/up.
+- Scroll / Scroll down / Scroll up.
 - Go a little lower/higher.
 - انزل شوية.
 - اطلع لفوق.
 - نزّل الصفحة.
 - ارجع لفوق.
+- اسكرول.
 
 Use go_back for browser/application back navigation.
 Use go_forward for forward navigation.
@@ -320,8 +343,36 @@ do not assume it means volume.
 Do not confuse volume commands with media playback commands.
 
 ==================================================
-10. FILES AND FOLDERS
+10. FILES, FOLDERS, RENAME, MOVE, DELETE, LIST, DISAMBIGUATION & CONFIRMATION
 ==================================================
+
+UNIVERSAL VOICE CONFIRMATION (`has_pending_confirmation`):
+- Check `has_pending_confirmation` and `pending_confirmation_question` in context.
+- If `has_pending_confirmation` is true:
+  1) If the user expresses ANY approval, agreement, or confirmation (e.g., "yes", "yeah", "yep", "sure", "confirm", "approve", "ok", "okay", "do it", "delete it", "go ahead", "آه", "اه", "ايوه", "أيوه", "موافقة", "موافق", "تمام", "أكيد", "امسحه", "امسحيه", "دوس", "نفذ", "ماشي"):
+     Return `intent = "confirm_action"`, `action = "confirm"`.
+  2) If the user refuses, declines, or cancels (e.g., "no", "nope", "cancel", "stop", "don't", "never mind", "لا", "لأ", "الغي", "إلغاء", "الغاء", "مش عايز", "بلاش", "خلاص"):
+     Return `intent = "confirm_action"`, `action = "cancel"`.
+
+Selecting from a previous file/folder disambiguation list:
+- Check `has_pending_file_selection`, `pending_file_candidates`, and `pending_operation` in context.
+- If `has_pending_file_selection` is true:
+  1) If the user wants to cancel/abort ("خلاص", "الغي", "مش عايز", "cancel", "nevermind"):
+     Return intent = "select_search_result" and action = "cancel".
+  2) If the user naturally describes WHICH file/folder they want from `pending_file_candidates`
+     (by number e.g. "رقم 2", "التاني", "آخر واحد", "the last one";
+      or by parent folder e.g. "اللي في الديسكتوب", "اللي جوه Downloads";
+      or by letter case e.g. "الكابيتال", "اللي كله سمول", "capital OS", "أول حرف كابيتال";
+      or by symbol vs literal word e.g. "النجمة الرمز", "اللي مكتوبة بالانجليزي", "the symbol one";
+      or by extension/type e.g. "الـ pdf", "الفولدر مش الفايل", "word file"):
+     Return:
+     - intent = "select_search_result"
+     - selected_path = exact full path string from `pending_file_candidates` that matches best
+     - selection = 1-based integer index (if identifiable)
+     - parent_folder = parent folder name if mentioned
+  3) If the user's reply is still ambiguous among multiple candidates in `pending_file_candidates`:
+     Return intent = "select_search_result", needs_clarification = true,
+     and ask a short natural question in `response_text` (in the user's language) to clarify which one.
 
 Use list_directory when the user asks to list, show, or
 display the contents of a folder.
@@ -329,25 +380,36 @@ display the contents of a folder.
 Keep file and folder names exactly as written by the user,
 including capital and small letters. Never change their case.
 
-Extract the folder path into target.
+Extract the folder path/name into target.
 Example:
-"List files in Downloads"
+"List files in Downloads" / "اعرض الملفات اللي في فولدر OS"
 Return:
 intent = "list_directory"
-target = "Downloads"
+target = "Downloads" (or "OS")
 
 Use open_local_file when the user asks to open a local file
 or folder.
+- If the user specifies a folder inside a parent folder, e.g.:
+  "افتح OS اللي جوه Home" or "open OS inside Desktop":
+  Set `target` = "OS" and `parent_folder` = "Home" (or "Desktop").
+- Remember to populate `symbol_variant` whenever the file/folder name includes
+  spoken symbol words like "underscore", "dash", "slash", "star", "dot", etc.
 
-Use create_structure when the user asks to create a file or folder.
+Use create_structure ONLY when the user explicitly asks to create or make a new file or folder.
+Never use create_structure when the user asks to open, list, move, rename, or delete an existing file/folder.
 
 Use delete_item when the user asks to delete a file or folder.
+
+Use rename_item when the user asks to rename a file or folder
+(e.g., "غير اسم فولدر OS لـ Linux" or "rename report.pdf to final.pdf").
+Extract the current item name/path into `source_path` (and `target`),
+and the new name into `new_name` (and `destination_path`).
 
 Use move_item when the user asks to move a file or folder
 from one location to another.
 
-Extract the original item path into source_path.
-Extract the destination folder path into destination_path.
+Extract the original item name/path into source_path.
+Extract the destination folder name/path into destination_path.
 
 Never guess missing source or destination paths.
 If either path is unclear or missing, set needs_clarification = true
@@ -372,6 +434,7 @@ Normalize common Arabic spoken names of standard Linux folders:
 - "داول لوت", "داونلودز", "داون لود" -> "Downloads"
 - "ديسكتوب" -> "Desktop"
 - "دوكيومنتس" -> "Documents"
+- "هوم", "الهوم" -> "Home"
 
 Preserve user-created folder names. Do not confuse the new folder name
 (folder_name) with its parent destination (target).
@@ -382,6 +445,13 @@ Example:
 Return:
 target = "Downloads"
 folder_name = "Projects"
+
+Compound Create + Open:
+If the user asks to create a folder/file and immediately open it,
+e.g. "اعمل فولدر اسمه Test جوه Downloads وافتحه":
+Return two actions in order:
+1) intent = "create_structure", target = "Downloads", folder_name = "Test"
+2) intent = "open_local_file", target = "Test", parent_folder = "Downloads"
 
 ==================================================
 11. MULTIPLE ACTIONS
@@ -494,6 +564,10 @@ Use exactly this structure for the main result:
 {
   "intent": "intent_name",
   "target": null,
+  "parent_folder": null,
+  "selected_path": null,
+  "english_phonetic": null,
+  "symbol_variant": null,
   "application": null,
   "platform": null,
   "query": null,
@@ -509,6 +583,7 @@ Use exactly this structure for the main result:
   "content": null,
   "source_path": null,
   "destination_path": null,
+  "new_name": null,
   "response_text": null,
   "confidence": 0.0,
   "needs_clarification": false,
@@ -525,6 +600,16 @@ Return JSON only.
 
 
 class CommandUnderstanding:
+
+    _CONFIRM_WORDS = {
+        "yes", "yeah", "yep", "sure", "confirm", "ok", "okay", "approve",
+        "آه", "اه", "ايوه", "أيوه", "موافقة", "موافق", "تمام", "اكيد", "أكيد",
+        "ماشي", "نفذ", "امسحه", "امسحيه", "دوس", "اضغط"
+    }
+    _CANCEL_WORDS = {
+        "no", "nope", "cancel", "stop", "abort", "nevermind",
+        "لا", "لأ", "الغي", "إلغاء", "الغاء", "بلاش", "خلاص", "مش عايز"
+    }
 
     def __init__(
         self,
@@ -547,8 +632,88 @@ class CommandUnderstanding:
             "last_video_search_query": None,
             "last_application": None,
             "last_website": None,
-            "last_screen_element": None
+            "last_screen_element": None,
+            "has_pending_file_selection": False,
+            "pending_file_candidates": [],
+            "pending_operation": None,
+            "pending_extra": {},
+            "has_pending_confirmation": False,
+            "pending_confirmation_question": None,
         }
+
+    def set_pending_file_selection(self, pending: bool, candidates=None, operation=None, extra=None):
+        self.conversation_context["has_pending_file_selection"] = bool(pending)
+        if pending and candidates:
+            self.conversation_context["pending_file_candidates"] = [
+                str(c) for c in candidates
+            ]
+            self.conversation_context["pending_operation"] = operation
+            self.conversation_context["pending_extra"] = extra or {}
+        elif not pending:
+            self.conversation_context["pending_file_candidates"] = []
+            self.conversation_context["pending_operation"] = None
+            self.conversation_context["pending_extra"] = {}
+
+    def set_pending_confirmation(self, pending: bool, question=None):
+        self.conversation_context["has_pending_confirmation"] = bool(pending)
+        self.conversation_context["pending_confirmation_question"] = (
+            str(question) if (pending and question) else None
+        )
+
+    # =====================================
+    # FAST-PATH LOCAL ROUTER (< 2ms)
+    # =====================================
+
+    def _try_fast_path(self, raw_command):
+        text = str(raw_command or "").strip()
+        cleaned = re.sub(r"[.!؟?،,]+$", "", text).strip().casefold()
+        if not cleaned:
+            return None
+
+        # 1. استجابة فورية لأي سؤال تأكيد صوتي معلق
+        if self.conversation_context.get("has_pending_confirmation"):
+            tokens = set(cleaned.split())
+            if cleaned in self._CONFIRM_WORDS or (tokens & self._CONFIRM_WORDS and not (tokens & self._CANCEL_WORDS)):
+                res = self._empty_action()
+                res["intent"] = "confirm_action"
+                res["action"] = "confirm"
+                res["confidence"] = 1.0
+                return res
+            if cleaned in self._CANCEL_WORDS or (tokens & self._CANCEL_WORDS):
+                res = self._empty_action()
+                res["intent"] = "confirm_action"
+                res["action"] = "cancel"
+                res["confidence"] = 1.0
+                return res
+
+        # 2. أوامر مباشرة سريعة بدون انتظار API
+        fast_map = [
+            (r"^(increase volume|volume up|علي الصوت|عليه الصوت|زود الصوت|ارفع الصوت)$",
+             {"intent": "increase_volume", "amount": 5}),
+            (r"^(decrease volume|volume down|وطي الصوت|قلل الصوت|اخفض الصوت)$",
+             {"intent": "decrease_volume", "amount": 5}),
+            (r"^(mute|mute volume|اكتم الصوت|كتم الصوت|اسكت)$",
+             {"intent": "mute"}),
+            (r"^(unmute|unmute volume|شغل الصوت|الغي كتم الصوت|فك الكتم)$",
+             {"intent": "unmute"}),
+            (r"^(scroll down|انزل تحت|نزل الصفحة|انزل لتحت)$",
+             {"intent": "scroll", "action": "down", "amount": 4}),
+            (r"^(scroll up|اطلع فوق|طلع الصفحة|اطلع لفوق)$",
+             {"intent": "scroll", "action": "up", "amount": 4}),
+            (r"^(click here|دوس هنا|اضغط هنا)$",
+             {"intent": "click_element", "target": "here"}),
+            (r"^(go back|ارجع|رجوع)$",
+             {"intent": "go_back"}),
+        ]
+
+        for pattern, spec in fast_map:
+            if re.match(pattern, cleaned):
+                res = self._empty_action()
+                res.update(spec)
+                res["confidence"] = 0.99
+                return res
+
+        return None
 
     # =====================================
     # UNDERSTAND COMMAND
@@ -560,6 +725,14 @@ class CommandUnderstanding:
             return self._clarification(
                 "I didn't hear a command. Please repeat it."
             )
+
+        fast_result = self._try_fast_path(command)
+        if fast_result is not None:
+            self._prepare_voice_metadata(fast_result, command)
+            self._update_context(fast_result)
+            print("[VOXY FAST-PATH UNDERSTANDING]")
+            print(json.dumps(fast_result, ensure_ascii=False, indent=2))
+            return fast_result
 
         context = json.dumps(
             self.conversation_context,
@@ -601,6 +774,7 @@ Return the required JSON structure only.
             result = self._normalize_result(result)
             self._restore_name_case(result, command)
             self._apply_video_context(result)
+            self._prepare_voice_metadata(result, command)
             self._update_context(result)
 
             print("[VOXY UNDERSTANDING]")
@@ -615,6 +789,14 @@ Return the required JSON structure only.
                 "I couldn't process that command. Please try again."
             )
 
+    def _prepare_voice_metadata(self, result, command):
+        """Attach detected language and speakable response_text for TTS feedback."""
+        result["detected_language"] = detect_language(str(command)) or "en"
+        if result.get("response_text"):
+            result["spoken_feedback"] = clean_text(result["response_text"])
+        else:
+            result["spoken_feedback"] = None
+
     # =====================================
     # ACTION DEFAULTS
     # =====================================
@@ -626,11 +808,12 @@ Return the required JSON structure only.
 
         for action in actions:
             if action.get("intent") not in (
-                "create_structure", "delete_item", "open_local_file"
+                "create_structure", "delete_item", "open_local_file",
+                "list_directory", "move_item", "rename_item"
             ):
                 continue
 
-            for field in ("folder_name", "file_name", "target"):
+            for field in ("folder_name", "file_name", "target", "parent_folder", "source_path", "new_name"):
                 value = action.get(field)
 
                 if isinstance(value, str) and value:
@@ -644,6 +827,10 @@ Return the required JSON structure only.
         return {
             "intent": "unknown",
             "target": None,
+            "parent_folder": None,
+            "selected_path": None,
+            "english_phonetic": None,
+            "symbol_variant": None,
             "application": None,
             "platform": None,
             "query": None,
@@ -659,6 +846,7 @@ Return the required JSON structure only.
             "content": None,
             "source_path": None,
             "destination_path": None,
+            "new_name": None,
             "response_text": None,
             "confidence": 0.0,
             "needs_clarification": False
@@ -684,10 +872,13 @@ Return the required JSON structure only.
             "search_video",
             "play_video",
             "open_local_file",
+            "select_search_result",
             "list_directory",
             "click",
             "click_element",
             "type_text",
+            "type_into_element",
+            "list_ui_elements",
             "scroll",
             "go_back",
             "go_forward",
@@ -700,6 +891,8 @@ Return the required JSON structure only.
             "create_structure",
             "delete_item",
             "move_item",
+            "rename_item",
+            "confirm_action",
             "conversational_response",
             "unknown"
         }
@@ -835,6 +1028,8 @@ Return the required JSON structure only.
         result["confidence"] = 0.0
         result["needs_clarification"] = True
         result["response_text"] = message
+        result["spoken_feedback"] = clean_text(message)
+        result["detected_language"] = detect_language(message) or "en"
         result["actions"] = []
 
         return result
