@@ -40,7 +40,7 @@ try:
 except Exception:
     sd = None
 
-LIVE_MIC_LEVEL = True
+LIVE_MIC_LEVEL = False
 
 # =====================================
 # ARABIC DISPLAY FIX (Tk does not join/reverse Arabic by itself)
@@ -927,30 +927,36 @@ class VoxyApp(tk.Tk):
 
         self.after(0, update)
 
-    def _audio_worker(self):
+    Bsmala:
+def _audio_worker(self):
+try:
+result = listen_and_transcribe(
+status_callback=self._update_audio_status
+)
 
-        try:
+# Handle both dictionary and string results
+if isinstance(result, dict):
+recognized_text = result.get("text", "")
+else:
+recognized_text = result or ""
 
-            recognized_text = listen_and_transcribe(
-                status_callback=self._update_audio_status
-            )
+recognized_text = str(recognized_text).strip()
 
-            self.after(
-                0,
-                self._process_recognized_speech,
-                recognized_text
-            )
+self.after(
+0,
+self._process_recognized_speech,
+recognized_text
+)
 
-        except Exception as error:
+except Exception as error:
+print("AUDIO WORKER ERROR:", flush=True)
+traceback.print_exc()
 
-            print("AUDIO WORKER ERROR:", flush=True)
-            traceback.print_exc()
-
-            self.after(
-                0,
-                self._show_audio_error,
-                str(error)
-            )
+self.after(
+0,
+self._show_audio_error,
+str(error)
+)
 
     def _process_recognized_speech(self, recognized_text):
 
