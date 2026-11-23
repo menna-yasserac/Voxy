@@ -51,7 +51,7 @@ class SecurityManager:
         "folder_name", "file_name", "source_path", "destination_path",
         "response_text", "new_name", "element_name", "element",
         "english_phonetic", "symbol_variant", "action", "url",
-        "selected_path", "parent_hint",
+        "selected_path", "parent_hint", "parent_folder",
     )
 
     # Top-level Home folders that must never be deleted / moved / renamed.
