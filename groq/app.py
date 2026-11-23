@@ -24,6 +24,10 @@ load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 import audio_service_AI
+<<<<<<< Updated upstream
+=======
+from wake_word_service import WakeWordService
+>>>>>>> Stashed changes
 from audio_service_AI import listen_and_transcribe
 from command_understanding import CommandUnderstanding
 from execution import LinuxExecutor
@@ -420,6 +424,11 @@ class VoxyApp(tk.Tk):
 
         self._audio_busy = False
         self.continuous_listening = True
+<<<<<<< Updated upstream
+=======
+        self._capture_mode = "wake"  # "wake" or "followup"
+        self._closing = False
+>>>>>>> Stashed changes
 
         # voice feedback bookkeeping (integrated in audio_service_AI)
         self._voice_last_command = ""
@@ -452,6 +461,10 @@ class VoxyApp(tk.Tk):
         self.side_card = None
         self.bottom = None
         self.mic_level = MicLevel()
+<<<<<<< Updated upstream
+=======
+        self.wake_word = WakeWordService(self._on_wake_word)
+>>>>>>> Stashed changes
         self.level = 0.0
         self._t0 = time.time()
 
@@ -467,6 +480,10 @@ class VoxyApp(tk.Tk):
         self._build_shell()
         self.show_page("Home")
         self.after(33, self._tick)
+<<<<<<< Updated upstream
+=======
+        self.after(1000, self.wake_word.start)
+>>>>>>> Stashed changes
 
     # -------------------------------------
     # helpers
@@ -530,6 +547,12 @@ class VoxyApp(tk.Tk):
         # مسح محتوى ملف auto_save.txt عند انتهاء الجلسة
         if hasattr(self.execution, "clear_auto_save"):
             self.execution.clear_auto_save()
+<<<<<<< Updated upstream
+=======
+        self._closing = True
+        self.continuous_listening = False
+        self.wake_word.stop()
+>>>>>>> Stashed changes
         self.mic_level.stop()
         self._vf("shutdown_voice")
         self.destroy()
@@ -674,6 +697,12 @@ class VoxyApp(tk.Tk):
         else:
             self._settings_page()
 
+<<<<<<< Updated upstream
+=======
+        if page == "Home" and self.continuous_listening and not self._audio_busy:
+            self.after(150, self._start_wake_listener)
+
+>>>>>>> Stashed changes
     def set_theme(self, light):
         if self.light_mode == light:
             return
@@ -828,6 +857,7 @@ class VoxyApp(tk.Tk):
     # MICROPHONE
     # =====================================
 
+<<<<<<< Updated upstream
     def start_listening(self):
 
         if self._audio_busy:
@@ -836,20 +866,86 @@ class VoxyApp(tk.Tk):
         self._vf("stop_speaking")
 
         self._audio_busy = True
+=======
+    def _on_wake_word(self):
+        # Called from the wake detector thread after its microphone stream closes.
+        try:
+            self.after(0, self._handle_wake_word)
+        except tk.TclError:
+            pass
+
+    def _handle_wake_word(self):
+        if (
+            self._closing
+            or not self.continuous_listening
+            or self._audio_busy
+        ):
+            return
+
+        if self.current_page != "Home":
+            self.after(500, self._start_wake_listener)
+            return
+
+        self._capture_mode = "followup"
+        self.status_message.set("Voxy heard you!")
+        if self.sound_feedback:
+            self._vf("speak", "Hello there! Welcome, Voxy is at your service.")
+
+        # Wait until the greeting finishes so it is not transcribed as the command.
+        self.after(150, self._wait_for_greeting_then_listen)
+
+    def _wait_for_greeting_then_listen(self):
+        if self._closing or not self.continuous_listening or self._audio_busy:
+            return
+        if self._vf("is_speaking"):
+            self.after(150, self._wait_for_greeting_then_listen)
+            return
+        self.start_listening(followup=False)
+
+    def _start_wake_listener(self):
+        if (
+            not self._closing
+            and self.continuous_listening
+            and not self._audio_busy
+            and self.current_page == "Home"
+        ):
+            self._capture_mode = "wake"
+            self.ui_state = "idle"
+            self.status_message.set("Waiting for “Voxy”…")
+            self.wake_word.start()
+
+    def start_listening(self, followup=False):
+        if self._closing or self._audio_busy:
+            return
+
+        # The wake detector has released its stream before its callback.
+        self.wake_word.stop()
+        self._vf("stop_speaking")
+
+        self._audio_busy = True
+        self._capture_mode = "followup" if followup else "command"
+>>>>>>> Stashed changes
         self.ui_state = "listening"
         if not (self.notice and self.notice.get("clarification")):
             self.notice = None
             self._render_bottom()
 
         self.status_message.set("Listening… Speak now!")
+<<<<<<< Updated upstream
         self.mic_level.start()
 
         threading.Thread(
             target=self._audio_worker,
+=======
+        threading.Thread(
+            target=self._audio_worker,
+            args=(followup,),
+>>>>>>> Stashed changes
             daemon=True
         ).start()
 
     def _update_audio_status(self, message):
+<<<<<<< Updated upstream
 
         def update():
             self.status_message.set(message)
@@ -883,21 +979,63 @@ class VoxyApp(tk.Tk):
 
     def _process_recognized_speech(self, recognized_text):
 
+=======
+        def update():
+            if not self._closing:
+                self.status_message.set(message)
+        try:
+            self.after(0, update)
+        except tk.TclError:
+            pass
+
+    def _audio_worker(self, followup=False):
+        try:
+            recognized_text = listen_and_transcribe(
+                status_callback=self._update_audio_status,
+                start_timeout=7 if followup else None
+            )
+            self.after(0, self._process_recognized_speech, recognized_text)
+        except TimeoutError as error:
+            if str(error) == "FOLLOWUP_IDLE_TIMEOUT":
+                self.after(0, self._followup_timeout)
+                return
+            self.after(0, self._show_audio_error, str(error))
+        except Exception as error:
+            print("AUDIO WORKER ERROR:", flush=True)
+            traceback.print_exc()
+            try:
+                self.after(0, self._show_audio_error, str(error))
+            except tk.TclError:
+                pass
+
+    def _followup_timeout(self):
+        self._audio_busy = False
+        self.mic_level.stop()
+        if self.continuous_listening and not self._closing:
+            self._start_wake_listener()
+
+    def _process_recognized_speech(self, recognized_text):
+>>>>>>> Stashed changes
         self._audio_busy = False
         self.mic_level.stop()
 
         if not recognized_text or not recognized_text.strip():
+<<<<<<< Updated upstream
 
             self._show_audio_error(
                 "No clear speech detected."
             )
 
+=======
+            self._show_audio_error("No clear speech detected.")
+>>>>>>> Stashed changes
             return
 
         self.command_var.set(recognized_text)
         self.submit_command()
 
     def _show_audio_error(self, error_message):
+<<<<<<< Updated upstream
 
         self._audio_busy = False
         self.mic_level.stop()
@@ -939,6 +1077,39 @@ class VoxyApp(tk.Tk):
         ):
 
             self.start_listening()
+=======
+        self._audio_busy = False
+        self.mic_level.stop()
+        self.ui_state = "idle"
+        print("Audio error:", error_message, flush=True)
+        self.status_message.set("Listening error. Returning to wake-word mode…")
+
+        if self.continuous_listening and not self._closing:
+            # Do not restart command recording directly; return to the wake detector.
+            self.after(1200, self._start_wake_listener)
+        else:
+            self.notice = {
+                "ok": False,
+                "clarification": False,
+                "title": "Microphone / Transcription Error",
+                "message": error_message,
+                "button": "Try Again",
+                "command": self.start_listening,
+            }
+            self._render_bottom()
+
+    def _resume_listening(self):
+        # Follow-up mode allows a response for 7 seconds; silence returns to wake mode.
+        if self._closing or not self.continuous_listening or self._audio_busy:
+            return
+        if self._vf("is_speaking"):
+            self.after(200, self._resume_listening)
+            return
+        if self.current_page == "Home":
+            self.start_listening(followup=True)
+        else:
+            self._start_wake_listener()
+>>>>>>> Stashed changes
 
     # =====================================
     # COMMAND SUBMISSION

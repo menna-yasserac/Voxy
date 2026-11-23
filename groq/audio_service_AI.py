@@ -683,7 +683,11 @@ def get_volume(audio):
     return float(np.sqrt(np.mean(np.square(audio))))
 
 
+<<<<<<< Updated upstream
 def record_audio_buffer(status_callback=None):
+=======
+def record_audio_buffer(status_callback=None, start_timeout=None):
+>>>>>>> Stashed changes
     """Records speech and returns an in-memory FLAC BytesIO buffer (fast upload, zero disk I/O)."""
     global _cached_noise_threshold
 
@@ -695,6 +699,11 @@ def record_audio_buffer(status_callback=None):
 
     chunks = []
     pre_roll = deque(maxlen=4)
+<<<<<<< Updated upstream
+=======
+    wait_seconds = START_TIMEOUT if start_timeout is None else max(0.1, float(start_timeout))
+    wait_chunks = max(1, int(wait_seconds / CHUNK_DURATION))
+>>>>>>> Stashed changes
 
     started = False
     silence_chunks = 0
@@ -732,7 +741,11 @@ def record_audio_buffer(status_callback=None):
         threshold = _cached_noise_threshold
         report("Listening… Speak now")
 
+<<<<<<< Updated upstream
         for i in range(WAIT_CHUNKS + MAX_CHUNKS):
+=======
+        for i in range(wait_chunks + MAX_CHUNKS):
+>>>>>>> Stashed changes
             audio, _ = stream.read(CHUNK_SIZE)
             audio = audio.copy().reshape(-1)
             volume = get_volume(audio)
@@ -744,7 +757,13 @@ def record_audio_buffer(status_callback=None):
                     chunks.extend(list(pre_roll))
                     speech_chunks = 1
                     report("Recording your voice…")
+<<<<<<< Updated upstream
                 elif i + 1 >= WAIT_CHUNKS:
+=======
+                elif i + 1 >= wait_chunks:
+                    if start_timeout is not None:
+                        raise TimeoutError("FOLLOWUP_IDLE_TIMEOUT")
+>>>>>>> Stashed changes
                     raise ValueError(
                         "No clear speech detected. "
                         "Check your microphone and try again."
@@ -819,10 +838,17 @@ def transcribe_audio(audio_source, status_callback=None):
     }
 
 
+<<<<<<< Updated upstream
 def listen_and_transcribe(status_callback=None):
     t0 = time.perf_counter()
     try:
         audio_buf = record_audio_buffer(status_callback)
+=======
+def listen_and_transcribe(status_callback=None, start_timeout=None):
+    t0 = time.perf_counter()
+    try:
+        audio_buf = record_audio_buffer(status_callback, start_timeout=start_timeout)
+>>>>>>> Stashed changes
         print(f"[Timing] Recording took {time.perf_counter() - t0:.3f}s", flush=True)
     except Exception as error:
         print("RECORDING ERROR:", repr(error), flush=True)
