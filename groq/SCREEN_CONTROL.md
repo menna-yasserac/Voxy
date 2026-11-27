@@ -27,7 +27,7 @@ Safety rules built in:
 | `screen_control.py` | **New.** Screenshot, OCR, matching, mouse click (Xorg + Wayland) and a self-test command line |
 | `execution.py` | New `click_element` (steps above). Also contains the delete fix from before |
 | `command_understanding.py` | Prompt rules for `here`, visible text, right / double click. Also contains the name-case fix |
-| `test_screen_control.py` | 41 automatic tests |
+| `test_screen_control.py` | 50 automatic tests |
 
 ## Install (Ubuntu)
 
@@ -58,11 +58,27 @@ python3 screen_control.py --image shot.png --find "Save"   # test on a saved scr
 python3 -m unittest test_screen_control -v        # automatic tests
 ```
 
+## If Voxy says "I couldn't find '...' on the screen"
+
+This is not a crash. AT-SPI did not know the element and the OCR did not read it. Check in this order:
+
+1. **Is the text on the screen written in the same language you spoke?**
+   Voxy already tries the common Arabic ↔ English button words (login, sign up, save, cancel...), but not every word.
+   Try saying the name exactly as it is written on the screen.
+2. **Is Arabic OCR installed?** (`sudo apt install tesseract-ocr-ara`). Run `python3 screen_control.py --check`.
+3. **See what Voxy reads.** Start Voxy from a terminal like this:
+   ```bash
+   VOXY_SCREEN_DEBUG=1 python3 main.py
+   ```
+   For every OCR pass it prints the words it read and the names it searched for. If your button is not in the list, the problem is the OCR (font, size, colours), not the matching.
+4. **Look at the picture.** `python3 screen_control.py --find "Save" --save-debug /tmp/debug.png` draws a red box around what was found.
+
 ## Settings (environment variables)
 
 | Variable | Meaning | Default |
 |----------|---------|---------|
 | `VOXY_OCR_LANGS` | Tesseract languages, e.g. `eng+ara` | `eng+ara` if Arabic is installed, else `eng` |
+| `VOXY_SCREEN_DEBUG` | Print what the OCR reads and what it searches for | off |
 | `VOXY_SCREEN_SCALE` | Divide OCR coordinates by this number (HiDPI / fractional scaling) | `1` |
 
 ## Known limits

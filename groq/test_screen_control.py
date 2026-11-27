@@ -97,6 +97,49 @@ class Matching(unittest.TestCase):
         self.assertTrue(sc.match_label(words, "تسجيل الدخول"))
 
 
+# ---------------------------------------------------------------- synonyms + grouping
+class Synonyms(unittest.TestCase):
+    def test_arabic_or_label_gets_english_candidates(self):
+        candidates = sc.candidate_labels("تسجيل الدخول أو الاشتراك")
+        self.assertEqual(candidates[0], sc.normalize_label("تسجيل الدخول أو الاشتراك"))
+        self.assertIn("log in or sign up", candidates)
+        self.assertIn("sign up", candidates)
+
+    def test_english_label_gets_arabic_candidates(self):
+        self.assertIn(sc.normalize_label("حفظ"), sc.candidate_labels("Save"))
+
+    def test_unknown_label_has_only_itself(self):
+        self.assertEqual(sc.candidate_labels("Zorblax"), ["zorblax"])
+
+    def test_own_words_have_no_penalty(self):
+        weighted = sc.weighted_candidates("تسجيل الدخول أو الاشتراك")
+        self.assertEqual(weighted[0][1], 0.0)
+        self.assertTrue(all(p > 0 for _, p in weighted[1:]))
+
+
+class Grouping(unittest.TestCase):
+    def test_short_words_stay_in_the_same_line(self):
+        # "or" and "up" have no tall letters, so OCR boxes them lower/shorter.
+        words = [word("Log", 319, 212, 25, 15), word("in", 350, 212, 11, 12),
+                 word("or", 366, 215, 14, 9), word("sign", 386, 212, 28, 15),
+                 word("up", 420, 215, 16, 12)]
+        lines = sc.group_lines(words)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual([w["text"] for w in lines[0]], ["Log", "in", "or", "sign", "up"])
+
+    def test_result_does_not_depend_on_word_order(self):
+        words = [word("Log", 319, 212, 25, 15), word("in", 350, 212, 11, 12),
+                 word("or", 366, 215, 14, 9), word("sign", 386, 212, 28, 15),
+                 word("up", 420, 215, 16, 12)]
+        a = [[w["text"] for w in l] for l in sc.group_lines(words)]
+        b = [[w["text"] for w in l] for l in sc.group_lines(list(reversed(words)))]
+        self.assertEqual(a, b)
+
+    def test_two_buttons_far_apart_stay_separate(self):
+        words = [word("Save", 100, 100, 30), word("Cancel", 300, 100, 40)]
+        self.assertEqual(len(sc.group_lines(words)), 2)
+
+
 # ---------------------------------------------------------------- OCR on real images
 def _find_font():
     for path in glob.glob("/usr/share/fonts/**/LiberationSans-Regular.ttf", recursive=True):
@@ -153,6 +196,27 @@ class OcrOnImages(unittest.TestCase):
         page = self.make_page(self.ITEMS)
         matches, _ = sc.ScreenController(langs="eng").find_text("Nothing here", image=page)
         self.assertEqual(matches, [])
+
+    def test_arabic_request_on_english_page(self):
+        page = self.make_page([("Log in or sign up", 300, 200),
+                               ("Sign up", 300, 400), ("Save", 600, 300)])
+        controller = sc.ScreenController(langs="eng")
+        matches, _ = controller.find_text("تسجيل الدخول أو الاشتراك", image=page)
+        best, reason = sc.pick_match(matches)
+        self.assertIsNotNone(best, reason)
+        self.assertTrue(best["whole_line"])
+        self.assertLess(abs(best["y"] - 219), 25)       # the combined button, not "Sign up"
+
+        matches, _ = controller.find_text("حفظ", image=page)
+        best, _ = sc.pick_match(matches)
+        self.assertEqual(best["text"], "Save")
+
+    def test_missing_arabic_ocr_is_explained(self):
+        page = self.make_page(self.ITEMS)
+        controller = sc.ScreenController(langs="eng")
+        ok, message = controller.click_text("شيء غير موجود", image=page)
+        self.assertFalse(ok)
+        self.assertIn("tesseract-ocr-ara", message)
 
     def test_click_text_uses_found_position(self):
         page = self.make_page(self.ITEMS)

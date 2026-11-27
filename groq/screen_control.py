@@ -79,6 +79,101 @@ def is_here(label):
     return normalize_label(label) in {normalize_label(w) for w in HERE_WORDS}
 
 
+# Common button words in Arabic and English. People often speak Arabic while
+# the page is in English (or the opposite), so both sides are tried.
+_SYNONYMS_RAW = {
+    "تسجيل الدخول": ["log in", "login", "sign in"],
+    "تسجيل دخول": ["log in", "login", "sign in"],
+    "دخول": ["log in", "sign in"],
+    "الدخول": ["log in", "sign in"],
+    "الاشتراك": ["sign up", "subscribe"],
+    "اشتراك": ["sign up", "subscribe"],
+    "انشاء حساب": ["sign up", "create account", "register"],
+    "حساب جديد": ["sign up", "create account"],
+    "تسجيل الخروج": ["log out", "sign out"],
+    "بحث": ["search"],
+    "ابحث": ["search"],
+    "حفظ": ["save"],
+    "الغاء": ["cancel"],
+    "موافق": ["ok", "agree", "accept"],
+    "قبول": ["accept"],
+    "رفض": ["decline", "reject"],
+    "تاكيد": ["confirm"],
+    "التالي": ["next", "continue"],
+    "السابق": ["back", "previous"],
+    "رجوع": ["back"],
+    "متابعه": ["continue"],
+    "استمرار": ["continue"],
+    "ارسال": ["send", "submit"],
+    "حذف": ["delete", "remove"],
+    "فتح": ["open"],
+    "اغلاق": ["close"],
+    "اعدادات": ["settings"],
+    "الاعدادات": ["settings"],
+    "الرئيسيه": ["home"],
+    "تحميل": ["download"],
+    "نعم": ["yes"],
+    "لا": ["no"],
+}
+
+
+def _build_synonyms():
+    forward, reverse = {}, {}
+    for arabic, english_list in _SYNONYMS_RAW.items():
+        key = normalize_label(arabic)
+        forward[key] = [normalize_label(e) for e in english_list]
+        for english in forward[key]:
+            reverse.setdefault(english, []).append(key)
+    return forward, reverse
+
+
+_SYN_FORWARD, _SYN_REVERSE = _build_synonyms()
+_OR_SPLIT = re.compile(r"\s+(?:او|or)\s+")
+
+
+def _translate_part(part):
+    return _SYN_FORWARD.get(part) or _SYN_REVERSE.get(part) or []
+
+
+def weighted_candidates(label):
+    """List of (text, penalty). The user's own words have no penalty;
+    translations and the separate parts of an 'A or B' label rank lower."""
+    base = normalize_label(label)
+    if not base:
+        return []
+
+    result = [(base, 0.0)]
+
+    def add(text, penalty):
+        text = normalize_label(text)
+        if text and text not in [t for t, _ in result]:
+            result.append((text, penalty))
+
+    parts = _OR_SPLIT.split(base)
+
+    if len(parts) > 1:
+        translated = [_translate_part(p) for p in parts]
+        if all(translated):
+            for i in range(max(len(t) for t in translated)):
+                add(" or ".join(t[min(i, len(t) - 1)] for t in translated), 0.005)
+
+        for part in parts:
+            for translation in _translate_part(part):
+                add(translation, 0.03)
+
+        for part in parts:
+            add(part, 0.03)
+
+    for translation in _translate_part(base):
+        add(translation, 0.005)
+
+    return result
+
+
+def candidate_labels(label):
+    return [text for text, _ in weighted_candidates(label)]
+
+
 # Clicking these can cause damage, so the executor asks for confirmation first.
 _DANGEROUS_WORDS = {
     "delete", "remove", "erase", "format", "uninstall", "wipe", "send",
@@ -211,6 +306,7 @@ def capture_screen():
 # =============================================================
 
 _LANG_CACHE = {}
+_DEBUG = bool(os.environ.get("VOXY_SCREEN_DEBUG"))
 
 
 def default_ocr_languages():
@@ -297,29 +393,47 @@ def ocr_words(image, langs, psm=11, mult=1.0, min_conf=30):
 
 
 def group_lines(words):
-    """Group words that sit next to each other on the same row."""
+    """Group words that sit next to each other on the same row.
+
+    Step 1 collects words with the same vertical centre into rows.
+    Step 2 cuts each row where there is a big horizontal gap (two buttons
+    next to each other must stay separate lines).
+    Working in two steps keeps the result independent of the order in which
+    OCR returns the words (small letters like "or" sit a few pixels lower).
+    """
+    rows = []
+
+    for word in sorted(words, key=lambda w: w["top"] + w["height"] / 2):
+        cy = word["top"] + word["height"] / 2
+
+        for row in rows:
+            row_cy = sum(w["top"] + w["height"] / 2 for w in row) / len(row)
+            row_h = sum(w["height"] for w in row) / len(row)
+
+            if abs(cy - row_cy) <= 0.5 * max(word["height"], row_h, 1):
+                row.append(word)
+                break
+        else:
+            rows.append([word])
+
     lines = []
 
-    for word in sorted(words, key=lambda w: (w["top"], w["left"])):
-        cy = word["top"] + word["height"] / 2
-        placed = False
+    for row in rows:
+        row.sort(key=lambda w: w["left"])
+        current = [row[0]]
 
-        for line in lines:
-            last = line[-1]
-            last_cy = last["top"] + last["height"] / 2
-            height = max(word["height"], last["height"], 1)
-            gap = word["left"] - (last["left"] + last["width"])
+        for word in row[1:]:
+            prev = current[-1]
+            gap = word["left"] - (prev["left"] + prev["width"])
+            height = max(word["height"], prev["height"], 1)
 
-            if abs(cy - last_cy) < 0.5 * height and -height <= gap <= 1.8 * height:
-                line.append(word)
-                placed = True
-                break
+            if gap <= 1.8 * height:
+                current.append(word)
+            else:
+                lines.append(current)
+                current = [word]
 
-        if not placed:
-            lines.append([word])
-
-    for line in lines:
-        line.sort(key=lambda w: w["left"])
+        lines.append(current)
 
     return lines
 
@@ -553,9 +667,18 @@ class ScreenController:
         (True, 12, 1.0),
     ]
 
+    def _print_debug(self, words, candidates, invert, psm, mult):
+        lines = [" ".join(w["text"] for w in line) for line in group_lines(words)]
+        print(f"[Screen] pass invert={invert} psm={psm} x{mult}: "
+              f"{len(words)} words, searching for {candidates}")
+        for text in lines[:40]:
+            print(f"[Screen]   | {text}")
+
     def find_text(self, label, image=None):
         """Return (matches, image_used). Reads the screen if no image is given."""
         label = strip_ui_words(label)
+        weighted = weighted_candidates(label)
+        candidates = [t for t, _ in weighted]
 
         if image is None:
             image, _ = capture_screen()
@@ -574,9 +697,17 @@ class ScreenController:
                 source = inverted
 
             words = ocr_words(source, langs, psm=psm, mult=mult)
-            collected = dedupe_matches(collected + match_label(words, label))
 
-            if any(m["whole_line"] and m["score"] >= 1.0 for m in collected):
+            if _DEBUG:
+                self._print_debug(words, candidates, invert, psm, mult)
+
+            for candidate, penalty in weighted:
+                found = match_label(words, candidate)
+                for item in found:
+                    item["score"] -= penalty
+                collected = dedupe_matches(collected + found)
+
+            if any(m["whole_line"] and m["score"] >= 0.97 for m in collected):
                 break
 
         return collected, image
@@ -597,7 +728,15 @@ class ScreenController:
         match, reason = pick_match(matches)
 
         if reason == "not_found":
-            return False, f"I couldn't find '{label}' on the screen."
+            message = f"I couldn't find '{label}' on the screen."
+
+            if re.search(r"[\u0600-\u06FF]", label) and "ara" not in self._langs():
+                message += (
+                    " Arabic text reading is not installed "
+                    "(sudo apt install tesseract-ocr-ara)."
+                )
+
+            return False, message
 
         if reason == "ambiguous":
             return False, (
